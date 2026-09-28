@@ -23,7 +23,12 @@ namespace NUpPdfPrinter
         private readonly bool _longEdge;
         private readonly int _paddedPageCount;
         private readonly CellContentOrientation _cellOrientation;
+
+        /// <summary>Отступ вокруг страницы внутри ячейки, в сотых долях дюйма.</summary>
         private readonly float _paddingHundredths;
+
+        /// <summary>Отступ от края листа A4, в сотых долях дюйма.</summary>
+        private readonly float _pageMarginHundredths;
 
         private int _currentGroupIndex;
         private int _renderDpi;
@@ -31,6 +36,13 @@ namespace NUpPdfPrinter
         // ====================================================================
         //  Конструктор
         // ====================================================================
+        /// <param name="pageMarginMm">
+        /// Отступ от края листа A4 в мм (0…30). Аналог «полей» в Word.
+        /// Реальная рабочая область = A4 минус 2 × pageMarginMm с каждой стороны.
+        /// </param>
+        /// <param name="paddingMm">
+        /// Отступ вокруг страницы внутри ячейки в мм (0…20).
+        /// </param>
         public NUpPrintDocument(
             IPageImageSource source,
             int pagesPerSheet,
@@ -38,11 +50,14 @@ namespace NUpPdfPrinter
             bool longEdge,
             int renderDpi = 150,
             CellContentOrientation cellOrientation = CellContentOrientation.Auto,
-            double paddingMm = 2.5)
+            double paddingMm = 2.5,
+            double pageMarginMm = 6.35)
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
             if (paddingMm < 0) paddingMm = 0;
             if (paddingMm > 50) paddingMm = 50;
+            if (pageMarginMm < 0) pageMarginMm = 0;
+            if (pageMarginMm > 50) pageMarginMm = 50;
 
             _source = source;
             _pagesPerSheet = pagesPerSheet;
@@ -50,14 +65,21 @@ namespace NUpPdfPrinter
             _longEdge = longEdge;
             _renderDpi = Math.Max(36, renderDpi);
             _cellOrientation = cellOrientation;
-            _paddingHundredths = (float)(paddingMm * 100.0 / 25.4);
 
+            // 1 мм = 1/25.4" = 100/25.4 сотых дюйма ≈ 3.937
+            _paddingHundredths = (float)(paddingMm * 100.0 / 25.4);
+            _pageMarginHundredths = (float)(pageMarginMm * 100.0 / 25.4);
+
+            // A4 в сотых долях дюйма. Ориентация по умолчанию — портрет.
             DefaultPageSettings.PaperSize = new PaperSize("A4", 827, 1169)
             {
                 RawKind = (int)PaperKind.A4
             };
-            DefaultPageSettings.Margins = new Margins(25, 25, 25, 25);
             DefaultPageSettings.Landscape = false;
+
+            // Margins в сотых долях дюйма; применяются драйвером, если он умеет.
+            int mg = (int)Math.Round(_pageMarginHundredths);
+            DefaultPageSettings.Margins = new Margins(mg, mg, mg, mg);
 
             PrinterSettings.Duplex = duplex
                 ? (longEdge ? Duplex.Vertical : Duplex.Horizontal)
@@ -83,6 +105,15 @@ namespace NUpPdfPrinter
             set => _renderDpi = Math.Max(36, value);
         }
 
+        /// <summary>
+        /// Ориентация листа. Влияет и на предпросмотр, и на печать.
+        /// </summary>
+        public bool Landscape
+        {
+            get => DefaultPageSettings.Landscape;
+            set => DefaultPageSettings.Landscape = value;
+        }
+
         // ====================================================================
         //  Публичный API для предпросмотра
         // ====================================================================
@@ -93,11 +124,16 @@ namespace NUpPdfPrinter
             if (targetDpi < 24) targetDpi = 24;
             if (sourceDpi < 24) sourceDpi = 24;
 
+            // Прямоугольник листа в 1/100". При ландшафте меняем стороны местами.
             int w = DefaultPageSettings.PaperSize.Width;
             int h = DefaultPageSettings.PaperSize.Height;
 
-            int pxW = Math.Max(1, (int)Math.Round(w / 100f * targetDpi));
-            int pxH = Math.Max(1, (int)Math.Round(h / 100f * targetDpi));
+            Rectangle bounds = DefaultPageSettings.Landscape
+                ? new Rectangle(0, 0, h, w)
+                : new Rectangle(0, 0, w, h);
+
+            int pxW = Math.Max(1, (int)Math.Round(bounds.Width / 100.0 * targetDpi));
+            int pxH = Math.Max(1, (int)Math.Round(bounds.Height / 100.0 * targetDpi));
 
             var bmp = new Bitmap(pxW, pxH, PixelFormat.Format24bppRgb);
             bmp.SetResolution(targetDpi, targetDpi);
@@ -105,7 +141,7 @@ namespace NUpPdfPrinter
             using (var g = Graphics.FromImage(bmp))
             {
                 g.Clear(Color.White);
-                RenderSheet(g, sheetIndex, new Rectangle(0, 0, w, h), sourceDpi);
+                RenderSheet(g, sheetIndex, bounds, sourceDpi);
             }
             return bmp;
         }
@@ -136,7 +172,6 @@ namespace NUpPdfPrinter
                     $"DpiX={e.Graphics.DpiX}, DpiY={e.Graphics.DpiY}, " +
                     $"Printer={PrinterSettings.PrinterName}");
 
-                // Дадим пользователю шанс увидеть детали, а не только «generic error».
                 throw new InvalidOperationException(
                     "Ошибка GDI+ при печати листа " + (_currentGroupIndex + 1) +
                     ". Код: 0x" + ex.ErrorCode.ToString("X") + ". " +
@@ -147,32 +182,27 @@ namespace NUpPdfPrinter
             e.HasMorePages = _currentGroupIndex * _pagesPerSheet < _paddedPageCount;
         }
 
-        /// <summary>
-        /// Изолирует драйвер принтера от сложных операций:
-        /// лист сначала рисуется в memory bitmap (безопасно),
-        /// затем одним DrawImage переносится на DC принтера.
-        /// </summary>
         private void DrawSheetToPrinter(PrintPageEventArgs e, int sheetIndex)
         {
             var g = e.Graphics;
 
-            // Определяем DPI для промежуточного bitmap.
-            // Cap на 300 — выше качество не растёт, а память растёт квадратично.
             int printerDpi = (int)Math.Round(g.DpiX);
             if (printerDpi < 72) printerDpi = 150;
             if (printerDpi > 300) printerDpi = 300;
 
-            // Размер листа в сотых дюйма.
             var bounds = e.PageBounds;
             if (bounds.Width <= 0 || bounds.Height <= 0)
-                bounds = new Rectangle(0, 0,
-                    DefaultPageSettings.PaperSize.Width,
-                    DefaultPageSettings.PaperSize.Height);
+            {
+                int w = DefaultPageSettings.PaperSize.Width;
+                int h = DefaultPageSettings.PaperSize.Height;
+                bounds = DefaultPageSettings.Landscape
+                    ? new Rectangle(0, 0, h, w)
+                    : new Rectangle(0, 0, w, h);
+            }
 
             int pxW = Math.Max(1, (int)Math.Round(bounds.Width / 100.0 * printerDpi));
             int pxH = Math.Max(1, (int)Math.Round(bounds.Height / 100.0 * printerDpi));
 
-            // Защита от «монструозных» bitmap — максимум ~120 МБ на кадр.
             long bytes = (long)pxW * pxH * 3;
             const long maxBytes = 120L * 1024 * 1024;
             if (bytes > maxBytes)
@@ -181,8 +211,7 @@ namespace NUpPdfPrinter
                 pxW = Math.Max(1, (int)(pxW * k));
                 pxH = Math.Max(1, (int)(pxH * k));
                 System.Diagnostics.Debug.WriteLine(
-                    $"[NUpPrintDocument] Sheet bitmap reduced to {pxW}x{pxH} " +
-                    $"({printerDpi} DPI → cap)");
+                    $"[NUpPrintDocument] Sheet bitmap reduced to {pxW}x{pxH}");
             }
 
             using (var sheetBmp = new Bitmap(pxW, pxH, PixelFormat.Format24bppRgb))
@@ -195,13 +224,12 @@ namespace NUpPdfPrinter
                     RenderSheet(gb, sheetIndex, bounds, _renderDpi);
                 }
 
-                // --- Blit на DC принтера — максимально просто и безопасно ---
                 var savedUnit = g.PageUnit;
                 var savedScale = g.PageScale;
 
                 try
                 {
-                    g.PageUnit = GraphicsUnit.Display; // = 1/100" на принтере
+                    g.PageUnit = GraphicsUnit.Display;
                     g.PageScale = 1.0f;
                     g.InterpolationMode = InterpolationMode.Default;
                     g.SmoothingMode = SmoothingMode.None;
@@ -224,22 +252,37 @@ namespace NUpPdfPrinter
         // ====================================================================
         private void RenderSheet(Graphics g, int sheetIndex, Rectangle pageBounds, int sourceDpi)
         {
-            // Единицы всегда 1/100 дюйма — совпадает с PaperSize и PageBounds.
             g.PageUnit = GraphicsUnit.Inch;
             g.PageScale = 0.01f;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.SmoothingMode = SmoothingMode.HighQuality;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
+            // --- Рабочая область внутри листа с учётом полей ---
+            float mgX = _pageMarginHundredths;
+            float mgY = _pageMarginHundredths;
+
+            // Ландшафтная бумага: ширины и высоты уже поменяны в pageBounds,
+            // поэтому просто вычитаем одинаковый отступ со всех четырёх сторон.
+            float innerX = pageBounds.X + mgX;
+            float innerY = pageBounds.Y + mgY;
+            float innerW = pageBounds.Width - mgX * 2f;
+            float innerH = pageBounds.Height - mgY * 2f;
+
+            if (innerW <= 1f || innerH <= 1f) return; // отступы съели лист
+
+            // Ориентация листа для сетки определяется по исходным pageBounds.
             bool sheetLandscape = pageBounds.Width > pageBounds.Height;
+
             var grid = GetGrid(_pagesPerSheet, sheetLandscape);
             int rows = grid.rows;
             int cols = grid.cols;
 
-            List<int> pageIndices = BuildPageIndices(sheetIndex, rows, cols);
+            List<int> pageIndices = BuildPageIndices(sheetIndex, rows, cols, sheetLandscape);
 
-            float cellW = pageBounds.Width / (float)cols;
-            float cellH = pageBounds.Height / (float)rows;
+            // Ячейки рассчитываются от рабочей области, а не от краёв листа.
+            float cellW = innerW / cols;
+            float cellH = innerH / rows;
 
             for (int i = 0; i < pageIndices.Count; i++)
             {
@@ -252,7 +295,10 @@ namespace NUpPdfPrinter
 
                 int row = i / cols;
                 int col = i % cols;
-                var cell = new RectangleF(col * cellW, row * cellH, cellW, cellH);
+                var cell = new RectangleF(
+                    innerX + col * cellW,
+                    innerY + row * cellH,
+                    cellW, cellH);
 
                 DrawPageFit(g, img, cell, _cellOrientation, _paddingHundredths);
                 DrawCellFrame(g, cell);
@@ -262,7 +308,7 @@ namespace NUpPdfPrinter
         // ====================================================================
         //  Раскладка страниц (нечётные на лице, чётные на обороте)
         // ====================================================================
-        private List<int> BuildPageIndices(int sheetIndex, int rows, int cols)
+        private List<int> BuildPageIndices(int sheetIndex, int rows, int cols, bool sheetLandscape)
         {
             int n = _pagesPerSheet;
             var result = new List<int>(n);
@@ -286,37 +332,36 @@ namespace NUpPdfPrinter
 
             if (!isBack)
             {
-                // Лицевая: 1, 3, 5, … (1-indexed) в порядке чтения.
                 for (int i = 0; i < n; i++)
                 {
                     int page = p0 + 2 * i;
                     result.Add(page < _source.PageCount ? page : -1);
                 }
+                return result;
             }
-            else
+
+            // Обратная сторона: выбираем направление зеркала.
+            bool mirrorColumns = sheetLandscape ? !_longEdge : _longEdge;
+
+            for (int i = 0; i < n; i++)
             {
-                // Обратная: печатаем зеркально, чтобы после переворота листа
-                // чётные страницы встали ровно за своими нечётными.
-                for (int i = 0; i < n; i++)
+                int r = i / cols;
+                int c = i % cols;
+
+                int viewingIndex;
+                if (mirrorColumns)
                 {
-                    int r = i / cols;
-                    int c = i % cols;
-
-                    int viewingIndex;
-                    if (_longEdge)
-                    {
-                        int vc = cols - 1 - c;         // зеркалим столбцы
-                        viewingIndex = r * cols + vc;
-                    }
-                    else
-                    {
-                        int vr = rows - 1 - r;         // зеркалим строки
-                        viewingIndex = vr * cols + c;
-                    }
-
-                    int page = p0 + 2 * viewingIndex + 1;
-                    result.Add(page < _source.PageCount ? page : -1);
+                    int vc = cols - 1 - c;
+                    viewingIndex = r * cols + vc;
                 }
+                else
+                {
+                    int vr = rows - 1 - r;
+                    viewingIndex = vr * cols + c;
+                }
+
+                int page = p0 + 2 * viewingIndex + 1;
+                result.Add(page < _source.PageCount ? page : -1);
             }
 
             return result;

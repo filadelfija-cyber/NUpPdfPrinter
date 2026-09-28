@@ -15,24 +15,39 @@ namespace NUpPdfPrinter
         // --- UI ---
         private Label _lblFile;
         private Button _btnOpen;
+        private Label _lblDpi;
         private NumericUpDown _numDpi;
 
+        private Label _lblPagesPerSheet;
         private ComboBox _cmbPagesPerSheet;
 
+        private Label _lblOrientation;
+        private ComboBox _cmbOrientation;         // формат листа: книжный / альбомный
+
         private CheckBox _chkDuplex;
+        private Label _lblEdge;
         private ComboBox _cmbDuplexEdge;
 
-        private ComboBox _cmbCellOrientation;
-        private NumericUpDown _numPadding;
+        private Label _lblCellOrientation;
+        private ComboBox _cmbCellOrientation;     // поворот страниц PDF внутри ячейки
 
+        private Label _lblPadding;
+        private NumericUpDown _numPadding;
+        private Label _lblPaddingMm;
+
+        private Label _lblPageMargin;
+        private NumericUpDown _numPageMargin;
+        private Label _lblPageMarginMm;
+
+        private Label _lblCache;
         private ComboBox _cmbCacheBudget;
         private Button _btnClearCache;
 
         private Label _lblPreview;
 
         private Button _btnPreview;
-        private Button _btnPrint;
         private Button _btnExit;
+        private Button _btnPrint;
 
         public MainForm()
         {
@@ -45,18 +60,20 @@ namespace NUpPdfPrinter
         private void InitializeUi()
         {
             Text = "N-up печать PDF (4 / 6 / 8 / 9 на листе A4)";
-            ClientSize = new Size(580, 520);
+            ClientSize = new Size(580, 570);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             Font = new Font("Segoe UI", 9F);
 
             // ---------- строка файла ----------
+            // Фиксированная ширина + AutoEllipsis — обрезает «…» при переполнении.
             _lblFile = new Label
             {
                 Text = "Файл не выбран",
                 Location = new Point(12, 12),
                 Size = new Size(556, 20),
+                AutoSize = false,
                 AutoEllipsis = true
             };
 
@@ -68,16 +85,16 @@ namespace NUpPdfPrinter
             };
             _btnOpen.Click += BtnOpen_Click;
 
-            var lblDpi = new Label
+            _lblDpi = new Label
             {
                 Text = "DPI рендеринга:",
                 Location = new Point(160, 45),
-                Size = new Size(110, 22)
+                AutoSize = true
             };
 
             _numDpi = new NumericUpDown
             {
-                Location = new Point(275, 43),
+                Location = new Point(280, 43),
                 Size = new Size(80, 24),
                 Minimum = 72,
                 Maximum = 400,
@@ -86,11 +103,11 @@ namespace NUpPdfPrinter
             };
 
             // ---------- страниц на листе ----------
-            var lblN = new Label
+            _lblPagesPerSheet = new Label
             {
                 Text = "Страниц на листе:",
                 Location = new Point(12, 90),
-                Size = new Size(130, 22)
+                AutoSize = true
             };
 
             _cmbPagesPerSheet = new ComboBox
@@ -102,6 +119,34 @@ namespace NUpPdfPrinter
             _cmbPagesPerSheet.Items.AddRange(new object[] { 4, 6, 8, 9 });
             _cmbPagesPerSheet.SelectedIndex = 0;
             _cmbPagesPerSheet.SelectedIndexChanged += (s, e) => UpdatePreviewText();
+
+            // ---------- формат листа ----------
+            _lblOrientation = new Label
+            {
+                Text = "Формат листа:",
+                Location = new Point(265, 90),
+                AutoSize = true
+            };
+
+            _cmbOrientation = new ComboBox
+            {
+                Location = new Point(380, 87),
+                Size = new Size(188, 24),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            _cmbOrientation.Items.AddRange(new object[]
+            {
+                "Книжный (портрет)",
+                "Альбомный (ландшафт)"
+            });
+            _cmbOrientation.SelectedIndex = 0;
+            _cmbOrientation.SelectedIndexChanged += (s, e) => UpdatePreviewText();
+
+            var tipOrientation = new ToolTip();
+            tipOrientation.SetToolTip(_cmbOrientation,
+                "Как ориентирован физический лист A4 при печати.\r\n" +
+                "Книжный — вертикально (портрет).\r\n" +
+                "Альбомный — горизонтально (ландшафт).");
 
             // ---------- дуплекс ----------
             _chkDuplex = new CheckBox
@@ -117,11 +162,11 @@ namespace NUpPdfPrinter
                 UpdatePreviewText();
             };
 
-            var lblEdge = new Label
+            _lblEdge = new Label
             {
                 Text = "Переворот листа:",
                 Location = new Point(12, 160),
-                Size = new Size(130, 22)
+                AutoSize = true
             };
 
             _cmbDuplexEdge = new ComboBox
@@ -138,40 +183,47 @@ namespace NUpPdfPrinter
             _cmbDuplexEdge.SelectedIndex = 0;
             _cmbDuplexEdge.SelectedIndexChanged += (s, e) => UpdatePreviewText();
 
-            // ---------- ориентация страниц в ячейках ----------
-            var lblCellOrientation = new Label
+            // ---------- поворот страниц PDF ----------
+            _lblCellOrientation = new Label
             {
-                Text = "Ориентация страниц:",
+                Text = "Поворот страниц PDF:",
                 Location = new Point(12, 195),
-                Size = new Size(130, 22)
+                AutoSize = true
             };
 
             _cmbCellOrientation = new ComboBox
             {
-                Location = new Point(150, 192),
+                Location = new Point(170, 192),
                 Size = new Size(230, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
             _cmbCellOrientation.Items.AddRange(new object[]
             {
-                "Авто (по ячейке)",
-                "Книжная (портрет)",
-                "Альбомная (ландшафт)"
+                "Авто (по форме ячейки)",
+                "Вертикально (книжная)",
+                "Горизонтально (альбомная)"
             });
             _cmbCellOrientation.SelectedIndex = 0;
             _cmbCellOrientation.SelectedIndexChanged += (s, e) => UpdatePreviewText();
 
-            // ---------- отступ ----------
-            var lblPadding = new Label
+            var tipCellOrientation = new ToolTip();
+            tipCellOrientation.SetToolTip(_cmbCellOrientation,
+                "Как исходная страница PDF ориентирована внутри своей ячейки.\r\n" +
+                "Авто — подбирается по форме ячейки (обычно оптимально).\r\n" +
+                "Вертикально — страница всегда книжная.\r\n" +
+                "Горизонтально — страница всегда альбомная.");
+
+            // ---------- зазор между страницами ----------
+            _lblPadding = new Label
             {
-                Text = "Отступ вокруг страницы:",
+                Text = "Зазор между страницами:",
                 Location = new Point(12, 230),
-                Size = new Size(150, 22)
+                AutoSize = true
             };
 
             _numPadding = new NumericUpDown
             {
-                Location = new Point(170, 228),
+                Location = new Point(180, 228),
                 Size = new Size(70, 24),
                 Minimum = 0m,
                 Maximum = 20m,
@@ -181,25 +233,65 @@ namespace NUpPdfPrinter
             };
             _numPadding.ValueChanged += (s, e) => UpdatePreviewText();
 
-            var lblPaddingMm = new Label
+            _lblPaddingMm = new Label
             {
                 Text = "мм (0…20, шаг 0,5)",
-                Location = new Point(245, 231),
-                Size = new Size(160, 22),
+                Location = new Point(258, 231),
+                AutoSize = true,
                 ForeColor = Color.DimGray
             };
 
+            var tipPadding = new ToolTip();
+            tipPadding.SetToolTip(_numPadding,
+                "Отступ вокруг каждой страницы внутри её ячейки.\r\n" +
+                "Реальное расстояние между соседними страницами = 2 × значение.");
+
+            // ---------- отступ от края листа A4 ----------
+            _lblPageMargin = new Label
+            {
+                Text = "Отступ от края листа:",
+                Location = new Point(12, 262),
+                AutoSize = true
+            };
+
+            _numPageMargin = new NumericUpDown
+            {
+                Location = new Point(180, 260),
+                Size = new Size(70, 24),
+                Minimum = 0m,
+                Maximum = 30m,
+                DecimalPlaces = 1,
+                Increment = 0.5m,
+                Value = 6.5m          // ≈ 0.25″ — типовая непечатаемая зона
+            };
+            _numPageMargin.ValueChanged += (s, e) => UpdatePreviewText();
+
+            _lblPageMarginMm = new Label
+            {
+                Text = "мм (0…30, шаг 0,5)",
+                Location = new Point(258, 263),
+                AutoSize = true,
+                ForeColor = Color.DimGray
+            };
+
+            var tipPageMargin = new ToolTip();
+            tipPageMargin.SetToolTip(_numPageMargin,
+                "Поля листа A4 со всех сторон — как в Word.\r\n" +
+                "Сужает рабочую область для сетки страниц.\r\n" +
+                "Для лазерных принтеров безопасно 6–8 мм;\r\n" +
+                "для струйных без полей можно 0, но край может обрезаться.");
+
             // ---------- кэш ----------
-            var lblCache = new Label
+            _lblCache = new Label
             {
                 Text = "Кэш страниц:",
-                Location = new Point(12, 265),
-                Size = new Size(110, 22)
+                Location = new Point(12, 295),
+                AutoSize = true
             };
 
             _cmbCacheBudget = new ComboBox
             {
-                Location = new Point(130, 262),
+                Location = new Point(130, 292),
                 Size = new Size(200, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
@@ -221,17 +313,19 @@ namespace NUpPdfPrinter
             _btnClearCache = new Button
             {
                 Text = "Очистить кэш",
-                Location = new Point(340, 261),
+                Location = new Point(340, 291),
                 Size = new Size(120, 28),
                 Enabled = false
             };
             _btnClearCache.Click += BtnClearCache_Click;
 
             // ---------- инфо-метка ----------
+            // Многострочный текст, ширина фиксированная.
             _lblPreview = new Label
             {
-                Location = new Point(12, 300),
-                Size = new Size(556, 100),
+                Location = new Point(12, 330),
+                Size = new Size(556, 140),
+                AutoSize = false,
                 ForeColor = Color.DimGray
             };
 
@@ -239,7 +333,7 @@ namespace NUpPdfPrinter
             _btnPreview = new Button
             {
                 Text = "Предпросмотр…",
-                Location = new Point(12, 435),
+                Location = new Point(12, 490),
                 Size = new Size(140, 34),
                 Enabled = false
             };
@@ -248,7 +342,7 @@ namespace NUpPdfPrinter
             _btnExit = new Button
             {
                 Text = "Выход",
-                Location = new Point(220, 435),
+                Location = new Point(220, 490),
                 Size = new Size(140, 34)
             };
             _btnExit.Click += (s, e) => Close();
@@ -256,7 +350,7 @@ namespace NUpPdfPrinter
             _btnPrint = new Button
             {
                 Text = "Печать…",
-                Location = new Point(428, 435),
+                Location = new Point(428, 490),
                 Size = new Size(140, 34),
                 Enabled = false
             };
@@ -264,12 +358,14 @@ namespace NUpPdfPrinter
 
             Controls.AddRange(new Control[]
             {
-                _lblFile, _btnOpen, lblDpi, _numDpi,
-                lblN, _cmbPagesPerSheet,
-                _chkDuplex, lblEdge, _cmbDuplexEdge,
-                lblCellOrientation, _cmbCellOrientation,
-                lblPadding, _numPadding, lblPaddingMm,
-                lblCache, _cmbCacheBudget, _btnClearCache,
+                _lblFile, _btnOpen, _lblDpi, _numDpi,
+                _lblPagesPerSheet, _cmbPagesPerSheet,
+                _lblOrientation, _cmbOrientation,
+                _chkDuplex, _lblEdge, _cmbDuplexEdge,
+                _lblCellOrientation, _cmbCellOrientation,
+                _lblPadding, _numPadding, _lblPaddingMm,
+                _lblPageMargin, _numPageMargin, _lblPageMarginMm,
+                _lblCache, _cmbCacheBudget, _btnClearCache,
                 _lblPreview,
                 _btnPreview, _btnExit, _btnPrint
             });
@@ -381,25 +477,36 @@ namespace NUpPdfPrinter
             int sheets = (_pageCount + block - 1) / block;
             int padded = sheets * block;
 
-            string orientText;
+            string sheetFormat = _cmbOrientation.SelectedIndex == 1
+                ? "A4 альбомный" : "A4 книжный";
+
+            string cellMode;
             switch (_cmbCellOrientation.SelectedIndex)
             {
-                case 1: orientText = "Книжная"; break;
-                case 2: orientText = "Альбомная"; break;
-                default: orientText = "Авто"; break;
+                case 1: cellMode = "вертикально (книжная)"; break;
+                case 2: cellMode = "горизонтально (альбомная)"; break;
+                default: cellMode = "авто (по форме ячейки)"; break;
             }
+
+            string edge = _cmbDuplexEdge.SelectedIndex == 0
+                ? "длинный край" : "короткий край";
 
             double padMm = (double)_numPadding.Value;
             double betweenMm = padMm * 2.0;
+            double marginMm = (double)_numPageMargin.Value;
 
             _lblPreview.Text =
                 "Страниц в PDF: " + _pageCount + "\r\n" +
-                "Листов A4: " + sheets +
+                "Листов: " + sheets +
                 " (логических страниц после дополнения: " + padded + ")\r\n" +
-                "Ориентация страниц: " + orientText +
-                ";  в памяти одновременно: не более " + n + " страниц\r\n" +
-                "Отступ до края ячейки: " + padMm.ToString("0.0") +
-                " мм;  между соседними страницами: " + betweenMm.ToString("0.0") + " мм\r\n" +
+                "Формат листа: " + sheetFormat +
+                ";  страницы PDF на листе: " + cellMode + "\r\n" +
+                (dup
+                    ? "Дуплекс: включён, переворот по " + edge
+                    : "Дуплекс: выключен") + "\r\n" +
+                "Поля листа: " + marginMm.ToString("0.0") + " мм со всех сторон\r\n" +
+                "Зазор между страницами: " + betweenMm.ToString("0.0") + " мм " +
+                "(отступ внутри ячейки " + padMm.ToString("0.0") + " мм × 2)\r\n" +
                 "Кэш страниц: " + (_source.CacheBytes / (1024.0 * 1024.0)).ToString("0.0") + " МБ";
         }
 
@@ -410,27 +517,35 @@ namespace NUpPdfPrinter
         {
             switch (_cmbCellOrientation.SelectedIndex)
             {
-                case 1: return CellContentOrientation.Portrait;
-                case 2: return CellContentOrientation.Landscape;
+                case 1: return CellContentOrientation.Portrait;   // вертикально
+                case 2: return CellContentOrientation.Landscape;  // горизонтально
                 default: return CellContentOrientation.Auto;
             }
         }
 
         private double GetPaddingMm() => (double)_numPadding.Value;
+        private double GetPageMarginMm() => (double)_numPageMargin.Value;
+
+        private bool GetSheetLandscape() => _cmbOrientation.SelectedIndex == 1;
 
         private NUpPrintDocument CreateDocument(bool duplex, bool longEdge)
         {
             int n = (int)_cmbPagesPerSheet.SelectedItem;
             int dpi = (int)_numDpi.Value;
 
-            return new NUpPrintDocument(
+            var doc = new NUpPrintDocument(
                 _source,
                 n,
                 duplex,
                 longEdge,
                 dpi,
                 GetCellOrientation(),
-                GetPaddingMm());
+                GetPaddingMm(),
+                GetPageMarginMm());
+
+            // Ориентация листа идёт и в предпросмотр, и в печать.
+            doc.Landscape = GetSheetLandscape();
+            return doc;
         }
 
         // ====================================================================
@@ -440,8 +555,7 @@ namespace NUpPdfPrinter
         {
             if (_source == null) return;
 
-            // Превью рендерится в 96 DPI — этого достаточно для экрана,
-            // а память в 2–3 раза меньше, чем при 150 DPI.
+            // Превью рендерится в 96 DPI — этого достаточно для экрана.
             const int previewDpi = 96;
 
             using (var doc = CreateDocument(
@@ -452,7 +566,6 @@ namespace NUpPdfPrinter
                 dlg.ShowDialog(this);
             }
 
-            // После закрытия превью обновим индикатор кэша.
             UpdatePreviewText();
         }
 
@@ -464,54 +577,57 @@ namespace NUpPdfPrinter
             if (_source == null) return;
 
             int n = (int)_cmbPagesPerSheet.SelectedItem;
-            bool dup = _chkDuplex.Checked;
-            bool longEdge = _cmbDuplexEdge.SelectedIndex == 0;
+            bool userWantsDuplex = _chkDuplex.Checked;
+            bool userWantsLongEdge = _cmbDuplexEdge.SelectedIndex == 0;
             var orient = GetCellOrientation();
             int dpi = (int)_numDpi.Value;
             double padMm = GetPaddingMm();
+            double pageMarginMm = GetPageMarginMm();
+            bool sheetLandscape = GetSheetLandscape();
 
-            using (var doc = new NUpPrintDocument(_source, n, dup, longEdge, dpi, orient, padMm))
-            using (var dlg = new PrintDialog
+            using (var doc = new NUpPrintDocument(
+                       _source, n, userWantsDuplex, userWantsLongEdge,
+                       dpi, orient, padMm, pageMarginMm))
             {
-                Document = doc,
-                UseEXDialog = true,
-                AllowSomePages = false,
-                AllowSelection = false,
-                AllowPrintToFile = false
-            })
-            {
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                doc.Landscape = sheetLandscape;
 
-                try
+                using (var dlg = new PrintDialog
                 {
-                    bool actualDuplex = doc.PrinterSettings.Duplex != Duplex.Simplex;
-                    bool actualLong = doc.PrinterSettings.Duplex != Duplex.Horizontal;
+                    Document = doc,
+                    UseEXDialog = true,
+                    AllowSomePages = false,
+                    AllowSelection = false,
+                    AllowPrintToFile = false
+                })
+                {
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-                    if (actualDuplex != dup || (actualDuplex && actualLong != longEdge))
-                    {
-                        // Драйвер поменял дуплекс — пересобираем документ.
-                        string printerName = doc.PrinterSettings.PrinterName;
-                        using (var redoc = new NUpPrintDocument(
-                                   _source, n, actualDuplex, actualLong, dpi, orient, padMm))
-                        {
-                            redoc.PrinterSettings.PrinterName = printerName;
-                            redoc.Print();
-                        }
-                    }
-                    else
+                    try
                     {
                         doc.Print();
-                    }
 
-                    MessageBox.Show(this,
-                        "Документ отправлен на печать.",
-                        "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(this,
-                        "Ошибка печати:\r\n" + ex.Message,
-                        "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show(this,
+                            "Документ отправлен на печать.",
+                            "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (System.Runtime.InteropServices.ExternalException ex)
+                    {
+                        MessageBox.Show(this,
+                            "Ошибка GDI+ при печати (код 0x" + ex.ErrorCode.ToString("X") + ").\r\n" +
+                            "Наиболее вероятные причины:\r\n" +
+                            " • мало свободного места на диске C:\\ (спулер печати);\r\n" +
+                            " • проблема с драйвером принтера;\r\n" +
+                            " • принтер офлайн или недоступен.\r\n\r\n" +
+                            "Освободите место на диске и повторите печать.",
+                            "Ошибка печати",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(this,
+                            "Ошибка печати:\r\n" + ex.Message,
+                            "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
                 }
             }
 
