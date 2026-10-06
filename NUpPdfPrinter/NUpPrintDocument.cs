@@ -569,13 +569,15 @@ namespace NUpPdfPrinter
             int shortDiv, longDiv;
             switch (n)
             {
+                case 2: shortDiv = 1; longDiv = 2; break;
+                case 3: shortDiv = 1; longDiv = 3; break;
                 case 4: shortDiv = 2; longDiv = 2; break;
                 case 6: shortDiv = 2; longDiv = 3; break;
                 case 8: shortDiv = 2; longDiv = 4; break;
                 case 9: shortDiv = 3; longDiv = 3; break;
                 default:
                     throw new ArgumentException(
-                        "Поддерживаются только 4, 6, 8 или 9 страниц на листе.", nameof(n));
+                        "Поддерживаются только 2, 3, 4, 6, 8 или 9 страниц на листе.", nameof(n));
             }
 
             return sheetLandscape
