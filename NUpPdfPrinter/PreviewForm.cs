@@ -5,7 +5,7 @@ using System.Windows.Forms;
 namespace NUpPdfPrinter
 {
     /// <summary>
-    /// Просмотрщик печати: одна страница (лист A4) за раз.
+    /// Просмотрщик печати: одна сторона A4 за раз.
     /// В памяти держится ровно один Bitmap листа; страницы источника — в LRU-кэше
     /// PdfPageImageSource. Источник НЕ dispose'ится — им владеет MainForm.
     /// </summary>
@@ -14,8 +14,8 @@ namespace NUpPdfPrinter
         private readonly NUpPrintDocument _doc;
         private readonly IPageImageSource _source;
         private readonly int _totalSheets;
-        private readonly int _targetDpi;   // разрешение Bitmap листа
-        private readonly int _sourceDpi;   // разрешение страниц источника
+        private readonly int _targetDpi;
+        private readonly int _sourceDpi;
 
         private PictureBox _picture;
         private Panel _navPanel;
@@ -33,10 +33,6 @@ namespace NUpPdfPrinter
         private Bitmap _currentBitmap;
         private bool _suppressNumEvent;
 
-        /// <param name="doc">Документ, чьи листы показываем.</param>
-        /// <param name="source">Источник страниц (нужен для индикатора кэша).</param>
-        /// <param name="targetDpi">DPI Bitmap листа (96 достаточно).</param>
-        /// <param name="sourceDpi">DPI страниц PDF (обычно тоже 96).</param>
         public PreviewForm(
             NUpPrintDocument doc,
             IPageImageSource source,
@@ -45,6 +41,7 @@ namespace NUpPdfPrinter
         {
             _doc = doc ?? throw new ArgumentNullException(nameof(doc));
             _source = source ?? throw new ArgumentNullException(nameof(source));
+
             _totalSheets = doc.SheetCount;
             _targetDpi = Math.Max(48, targetDpi);
             _sourceDpi = Math.Max(48, sourceDpi);
@@ -53,6 +50,13 @@ namespace NUpPdfPrinter
                 throw new InvalidOperationException("Документ не содержит листов.");
 
             BuildUi();
+
+            // После лэйаута панели пересчитываем позиции закреплённых кнопок.
+            _navPanel.Layout += (s, e) =>
+            {
+                _btnClose.Left = Math.Max(0, _navPanel.ClientSize.Width - _btnClose.Width - 8);
+            };
+
             RenderCurrent();
 
             _cacheTimer = new Timer { Interval = 500 };
@@ -60,6 +64,9 @@ namespace NUpPdfPrinter
             _cacheTimer.Start();
         }
 
+        // ====================================================================
+        //  UI
+        // ====================================================================
         private void BuildUi()
         {
             Text = "Предпросмотр печати";
@@ -72,8 +79,7 @@ namespace NUpPdfPrinter
             _navPanel = new Panel
             {
                 Dock = DockStyle.Bottom,
-                Height = 44,
-                Padding = new Padding(8)
+                Height = 44
             };
 
             _btnFirst = new Button { Text = "|<", Location = new Point(8, 8), Size = new Size(40, 28) };
@@ -104,14 +110,14 @@ namespace NUpPdfPrinter
             _lblOf = new Label
             {
                 Location = new Point(276, 13),
-                Size = new Size(120, 20),
+                AutoSize = true,
                 Text = "из " + _totalSheets
             };
 
             _lblCache = new Label
             {
                 Location = new Point(400, 13),
-                Size = new Size(240, 20),
+                AutoSize = true,
                 ForeColor = Color.DimGray,
                 Text = "Кэш: —"
             };
@@ -119,7 +125,7 @@ namespace NUpPdfPrinter
             _btnClose = new Button
             {
                 Text = "Закрыть",
-                Location = new Point(_navPanel.ClientSize.Width - 110, 8),
+                Location = new Point(900, 8),       // скорректируется в Layout
                 Size = new Size(96, 28),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right
             };
@@ -143,12 +149,21 @@ namespace NUpPdfPrinter
             Controls.Add(_navPanel);
         }
 
+        // ====================================================================
+        //  Индикатор кэша
+        // ====================================================================
         private void OnCacheTimerTick(object sender, EventArgs e)
         {
+            long bytes = 0;
+            try { bytes = _source.CacheBytes; } catch { /* источник мог быть закрыт */ }
+
             _lblCache.Text = "Кэш: " +
-                (_source.CacheBytes / (1024.0 * 1024.0)).ToString("0.0") + " МБ";
+                (bytes / (1024.0 * 1024.0)).ToString("0.0") + " МБ";
         }
 
+        // ====================================================================
+        //  Навигация
+        // ====================================================================
         private void GoTo(int index)
         {
             if (index < 0) index = 0;
@@ -172,7 +187,8 @@ namespace NUpPdfPrinter
             Cursor = Cursors.WaitCursor;
             try
             {
-                _currentBitmap = _doc.RenderSheetToBitmap(_currentIndex, _targetDpi, _sourceDpi);
+                _currentBitmap = _doc.RenderSheetToBitmap(
+                    _currentIndex, _targetDpi, _sourceDpi);
                 _picture.Image = _currentBitmap;
             }
             catch (Exception ex)
@@ -195,10 +211,13 @@ namespace NUpPdfPrinter
 
             Text = "Предпросмотр — лист " + (_currentIndex + 1) + " из " + _totalSheets;
 
-            // Немедленно обновим индикатор кэша, не дожидаясь таймера.
+            // Обновим индикатор кэша сразу, не дожидаясь таймера.
             OnCacheTimerTick(this, EventArgs.Empty);
         }
 
+        // ====================================================================
+        //  Завершение
+        // ====================================================================
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             if (_cacheTimer != null)
@@ -209,7 +228,9 @@ namespace NUpPdfPrinter
                 _cacheTimer = null;
             }
 
-            _picture.Image = null;
+            if (_picture != null)
+                _picture.Image = null;
+
             if (_currentBitmap != null)
             {
                 _currentBitmap.Dispose();
@@ -217,7 +238,7 @@ namespace NUpPdfPrinter
             }
 
             base.OnFormClosed(e);
-            // ВНИМАНИЕ: _source и _doc НЕ dispose'им — ими владеет MainForm.
+            // _source и _doc НЕ dispose'им — ими владеет MainForm.
         }
     }
 }
