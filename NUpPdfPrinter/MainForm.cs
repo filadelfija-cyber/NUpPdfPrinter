@@ -829,11 +829,11 @@ namespace NUpPdfPrinter
             _cmbCacheBudget.Items.AddRange(new object[]
             {
                 "Без кэша (мин. память)",
-                "16 МБ",
                 "32 МБ",
-                "48 МБ (по умолчанию)",
-                "96 МБ",
-                "192 МБ"
+                "64 МБ",
+                "96 МБ (по умолчанию)",
+                "192 МБ",
+                "384 МБ"
             });
             _cmbCacheBudget.SelectedIndex = 3;
             _cmbCacheBudget.SelectedIndexChanged += (s, e) =>
@@ -1290,7 +1290,7 @@ namespace NUpPdfPrinter
         {
             if (_source == null) return;
 
-            const int previewDpi = 72;
+            const int previewDpi = 120;
 
             using (var doc = CreateDocument(
                        _chkDuplex.Checked,

@@ -23,7 +23,7 @@ namespace NUpPdfPrinter
         private long _cacheBytes;
         private bool _disposed;
 
-        public PdfPageImageSource(string filePath, long cacheBudgetBytes = 48L * 1024 * 1024)
+        public PdfPageImageSource(string filePath, long cacheBudgetBytes = 96L * 1024 * 1024)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("PDF-файл не найден.", filePath);
@@ -137,6 +137,14 @@ namespace NUpPdfPrinter
             int bpp = Image.GetPixelFormatSize(img.PixelFormat);
             long pixels = (long)img.Width * img.Height;
             return pixels * bpp / 8L + 1024; // +1 KB на заголовки GDI+
+        }
+
+        public static long EstimateBudgetForPages(int pageCount, int dpi, double avgPageWidthIn, double avgPageHeightIn)
+        {
+            // 3 байта на пиксель (24bppRgb) + 15% на оверхед GDI+.
+            long perPage = (long)(avgPageWidthIn * dpi) *
+                           (long)(avgPageHeightIn * dpi) * 3;
+            return (long)(perPage * pageCount * 1.15);
         }
 
         private Image RenderPageBitmap(int index, int dpi)
