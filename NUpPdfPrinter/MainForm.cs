@@ -12,20 +12,17 @@ namespace NUpPdfPrinter
     /// Главная форма приложения: список PDF-документов, N-up настройки,
     /// предпросмотр и печать.
     ///
-    /// Отзывчивость UI:
-    ///   • Открытие и переоткрытие PDF — в фоне через Task.Run.
-    ///   • Очистка кэша и GC — в фоне.
-    ///   • Печать — в фоне (doc.Print в Task.Run).
-    ///   • Все потенциально долгие операции сопровождаются состоянием
-    ///     «занято»: курсор ожидания, кнопки disabled.
-    ///
-    /// Компоновка: 1000 × 750, две колонки групп.
-    /// Сверху во всю ширину — список PDF-файлов с кнопками управления.
-    /// Слева — страницы, дуплекс, совмещение, сводка.
-    /// Справа — раскладка листа, отступы, кэш.
+    /// Компактная компоновка: 1000 × 680 — влезает на HD-экраны (1280×720)
+    /// без прокрутки и без обрезки. Две колонки групп, сверху во всю ширину
+    /// список PDF-файлов.
     /// </summary>
     public sealed class MainForm : Form
     {
+        [System.Runtime.InteropServices.DllImport("psapi.dll")]
+        private static extern int EmptyWorkingSet(IntPtr hProcess);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
         // ====================================================================
         //  Состояние
         // ====================================================================
@@ -36,37 +33,30 @@ namespace NUpPdfPrinter
         private bool _suppressRangeUpdate;
         private bool _suppressMarginSync;
 
-        // Счётчик активных фоновых операций. Пока > 0 — UI в состоянии
-        // «занято»: курсор ожидания, кнопки заблокированы.
         private int _busyCount;
         private bool IsBusy => _busyCount > 0;
 
         // ====================================================================
         //  UI-элементы
         // ====================================================================
-        // Группа «Документы PDF»
         private ListBox _lstFiles;
         private Button _btnAddPdf;
         private Button _btnRemovePdf;
         private Button _btnMoveUp;
         private Button _btnMoveDown;
         private Button _btnClearFiles;
-        private Label _lblFilesHint;
         private Label _lblFile;
 
-        // Группа «Страницы для печати»
         private CheckBox _chkAllPages;
         private Label _lblRangeFrom;
         private NumericUpDown _numFirstPage;
         private Label _lblRangeTo;
         private NumericUpDown _numLastPage;
 
-        // Группа «Двусторонняя печать»
         private CheckBox _chkDuplex;
         private Label _lblEdge;
         private ComboBox _cmbDuplexEdge;
 
-        // Группа «Совмещение сторон»
         private CheckBox _chkRegistrationMarks;
         private Label _lblBackOffset;
         private Label _lblBackOffsetX;
@@ -76,7 +66,6 @@ namespace NUpPdfPrinter
         private NumericUpDown _numBackOffsetY;
         private Label _lblBackOffsetYmm;
 
-        // Группа «Раскладка листа»
         private Label _lblDpi;
         private NumericUpDown _numDpi;
         private Label _lblPagesPerSheet;
@@ -88,8 +77,8 @@ namespace NUpPdfPrinter
         private Label _lblPadding;
         private NumericUpDown _numPadding;
         private Label _lblPaddingMm;
+        private CheckBox _chkParallelRendering;
 
-        // Группа «Отступы от края A4»
         private CheckBox _chkSameMargins;
         private Label _lblMarginLeft;
         private NumericUpDown _numMarginLeft;
@@ -104,12 +93,10 @@ namespace NUpPdfPrinter
         private NumericUpDown _numMarginBottom;
         private Label _lblMarginBottomMm;
 
-        // Группа «Кэш страниц»
         private Label _lblCache;
         private ComboBox _cmbCacheBudget;
         private Button _btnClearCache;
 
-        // Сводка и кнопки
         private Label _lblPreview;
         private Button _btnPreview;
         private Button _btnExit;
@@ -129,39 +116,39 @@ namespace NUpPdfPrinter
         private void InitializeUi()
         {
             Text = "N-up печать PDF (2 / 3 / 4 / 6 / 8 / 9 на листе A4)";
-            ClientSize = new Size(1000, 750);
+            ClientSize = new Size(1000, 680);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             Font = new Font("Segoe UI", 9F);
 
-            BuildGroupFiles();
+            BuildGroupFiles();   // 12, 6, 976 × 130
 
-            // Левая колонка x=12, ширина 480
-            BuildGroupPages();
-            BuildGroupDuplex();
-            BuildGroupAlign();
+            // Левая колонка x = 12, ширина 480
+            BuildGroupPages();   // 12, 142, 480 × 58
+            BuildGroupDuplex();  // 12, 206, 480 × 75
+            BuildGroupAlign();   // 12, 287, 480 × 92
 
-            // Правая колонка x=508, ширина 480
-            BuildGroupLayout();
-            BuildGroupMargins();
-            BuildGroupCache();
+            // Правая колонка x = 508, ширина 480
+            BuildGroupLayout();  // 508, 142, 480 × 240
+            BuildGroupMargins(); // 508, 388, 480 × 130
+            BuildGroupCache();   // 508, 524, 480 × 75
 
-            // Сводка (левая колонка, под группами)
+            // Сводка — левая колонка
             _lblPreview = new Label
             {
-                Location = new Point(12, 467),
-                Size = new Size(480, 220),
+                Location = new Point(12, 385),
+                Size = new Size(480, 205),
                 AutoSize = false,
                 ForeColor = Color.DimGray
             };
             Controls.Add(_lblPreview);
 
-            // Кнопки — по центру внизу
+            // Кнопки — по центру внизу, Y = 610
             _btnPreview = new Button
             {
                 Text = "Предпросмотр…",
-                Location = new Point(270, 700),
+                Location = new Point(270, 610),
                 Size = new Size(140, 34),
                 Enabled = false
             };
@@ -170,7 +157,7 @@ namespace NUpPdfPrinter
             _btnExit = new Button
             {
                 Text = "Выход",
-                Location = new Point(430, 700),
+                Location = new Point(430, 610),
                 Size = new Size(140, 34)
             };
             _btnExit.Click += (s, e) => Close();
@@ -178,7 +165,7 @@ namespace NUpPdfPrinter
             _btnPrint = new Button
             {
                 Text = "Печать…",
-                Location = new Point(590, 700),
+                Location = new Point(590, 610),
                 Size = new Size(140, 34),
                 Enabled = false
             };
@@ -190,22 +177,22 @@ namespace NUpPdfPrinter
         }
 
         // ====================================================================
-        //  Группа «Документы PDF» (12, 12, 976 × 160)
+        //  Группа «Документы PDF» — 12, 6, 976 × 130
         // ====================================================================
         private void BuildGroupFiles()
         {
             var grp = new GroupBox
             {
                 Text = "Документы PDF (порядок в списке = порядок страниц при печати)",
-                Location = new Point(12, 12),
-                Size = new Size(976, 160)
+                Location = new Point(12, 6),
+                Size = new Size(976, 130)
             };
 
             _lblFile = new Label
             {
                 Text = "Файлы не выбраны",
                 Location = new Point(10, 20),
-                Size = new Size(700, 20),
+                Size = new Size(700, 16),
                 AutoSize = false,
                 AutoEllipsis = true,
                 ForeColor = Color.FromArgb(60, 60, 60)
@@ -213,8 +200,8 @@ namespace NUpPdfPrinter
 
             _lstFiles = new ListBox
             {
-                Location = new Point(10, 44),
-                Size = new Size(700, 106),
+                Location = new Point(10, 40),
+                Size = new Size(700, 76),
                 SelectionMode = SelectionMode.One,
                 IntegralHeight = false,
                 HorizontalScrollbar = true
@@ -222,19 +209,25 @@ namespace NUpPdfPrinter
             _lstFiles.SelectedIndexChanged += (s, e) => UpdateButtonsEnabled();
             _lstFiles.DoubleClick += BtnRemovePdf_Click;
 
+            // Подсказка о двойном клике переехала в tooltip.
+            var tipFiles = new ToolTip();
+            tipFiles.SetToolTip(_lstFiles,
+                "Двойной клик по файлу — удалить.\r\n" +
+                "Страницы нумеруются сквозным образом по порядку списка.");
+
             _btnAddPdf = new Button
             {
                 Text = "Добавить PDF…",
-                Location = new Point(720, 44),
-                Size = new Size(120, 28)
+                Location = new Point(720, 40),
+                Size = new Size(120, 26)
             };
             _btnAddPdf.Click += BtnAddPdf_Click;
 
             _btnRemovePdf = new Button
             {
                 Text = "Удалить",
-                Location = new Point(848, 44),
-                Size = new Size(118, 28),
+                Location = new Point(848, 40),
+                Size = new Size(118, 26),
                 Enabled = false
             };
             _btnRemovePdf.Click += BtnRemovePdf_Click;
@@ -242,8 +235,8 @@ namespace NUpPdfPrinter
             _btnMoveUp = new Button
             {
                 Text = "Вверх",
-                Location = new Point(720, 78),
-                Size = new Size(120, 28),
+                Location = new Point(720, 70),
+                Size = new Size(120, 26),
                 Enabled = false
             };
             _btnMoveUp.Click += async (s, e) => await MoveSelectedFileAsync(-1);
@@ -251,8 +244,8 @@ namespace NUpPdfPrinter
             _btnMoveDown = new Button
             {
                 Text = "Вниз",
-                Location = new Point(848, 78),
-                Size = new Size(118, 28),
+                Location = new Point(848, 70),
+                Size = new Size(118, 26),
                 Enabled = false
             };
             _btnMoveDown.Click += async (s, e) => await MoveSelectedFileAsync(+1);
@@ -260,48 +253,38 @@ namespace NUpPdfPrinter
             _btnClearFiles = new Button
             {
                 Text = "Очистить список",
-                Location = new Point(720, 112),
-                Size = new Size(246, 28),
+                Location = new Point(720, 100),
+                Size = new Size(246, 26),
                 Enabled = false
             };
             _btnClearFiles.Click += BtnClearFiles_Click;
-
-            _lblFilesHint = new Label
-            {
-                Text = "Двойной клик по файлу — удалить. " +
-                            "Страницы нумеруются сквозным образом по порядку списка.",
-                Location = new Point(10, 152),
-                Size = new Size(700, 16),
-                ForeColor = Color.DimGray,
-                Font = new Font("Segoe UI", 8F)
-            };
 
             grp.Controls.AddRange(new Control[]
             {
                 _lblFile, _lstFiles,
                 _btnAddPdf, _btnRemovePdf,
                 _btnMoveUp, _btnMoveDown,
-                _btnClearFiles, _lblFilesHint
+                _btnClearFiles
             });
             Controls.Add(grp);
         }
 
         // ====================================================================
-        //  Группа «Страницы для печати» (12, 182, 480 × 65)
+        //  Группа «Страницы для печати» — 12, 142, 480 × 58
         // ====================================================================
         private void BuildGroupPages()
         {
             var grp = new GroupBox
             {
                 Text = "Страницы для печати",
-                Location = new Point(12, 182),
-                Size = new Size(480, 65)
+                Location = new Point(12, 142),
+                Size = new Size(480, 58)
             };
 
             _chkAllPages = new CheckBox
             {
                 Text = "Все страницы",
-                Location = new Point(10, 22),
+                Location = new Point(10, 20),
                 Size = new Size(115, 24),
                 Checked = true
             };
@@ -316,13 +299,13 @@ namespace NUpPdfPrinter
             _lblRangeFrom = new Label
             {
                 Text = "с:",
-                Location = new Point(135, 25),
+                Location = new Point(135, 23),
                 AutoSize = true
             };
 
             _numFirstPage = new NumericUpDown
             {
-                Location = new Point(155, 21),
+                Location = new Point(155, 19),
                 Size = new Size(65, 24),
                 Minimum = 1,
                 Maximum = 1,
@@ -345,13 +328,13 @@ namespace NUpPdfPrinter
             _lblRangeTo = new Label
             {
                 Text = "по:",
-                Location = new Point(230, 25),
+                Location = new Point(230, 23),
                 AutoSize = true
             };
 
             _numLastPage = new NumericUpDown
             {
-                Location = new Point(258, 21),
+                Location = new Point(258, 19),
                 Size = new Size(65, 24),
                 Minimum = 1,
                 Maximum = 1,
@@ -383,21 +366,21 @@ namespace NUpPdfPrinter
         }
 
         // ====================================================================
-        //  Группа «Двусторонняя печать» (12, 257, 480 × 85)
+        //  Группа «Двусторонняя печать» — 12, 206, 480 × 75
         // ====================================================================
         private void BuildGroupDuplex()
         {
             var grp = new GroupBox
             {
                 Text = "Двусторонняя печать",
-                Location = new Point(12, 257),
-                Size = new Size(480, 85)
+                Location = new Point(12, 206),
+                Size = new Size(480, 75)
             };
 
             _chkDuplex = new CheckBox
             {
                 Text = "Печатать с двух сторон",
-                Location = new Point(10, 22),
+                Location = new Point(10, 20),
                 Size = new Size(220, 24),
                 Checked = true
             };
@@ -410,13 +393,13 @@ namespace NUpPdfPrinter
             _lblEdge = new Label
             {
                 Text = "Переворот листа:",
-                Location = new Point(10, 52),
+                Location = new Point(10, 48),
                 AutoSize = true
             };
 
             _cmbDuplexEdge = new ComboBox
             {
-                Location = new Point(150, 49),
+                Location = new Point(150, 45),
                 Size = new Size(230, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
@@ -441,21 +424,21 @@ namespace NUpPdfPrinter
         }
 
         // ====================================================================
-        //  Группа «Совмещение сторон» (12, 352, 480 × 105)
+        //  Группа «Совмещение сторон» — 12, 287, 480 × 92
         // ====================================================================
         private void BuildGroupAlign()
         {
             var grp = new GroupBox
             {
                 Text = "Совмещение сторон",
-                Location = new Point(12, 352),
-                Size = new Size(480, 105)
+                Location = new Point(12, 287),
+                Size = new Size(480, 92)
             };
 
             _chkRegistrationMarks = new CheckBox
             {
                 Text = "Метки совмещения (рамка и крест на обеих сторонах)",
-                Location = new Point(10, 22),
+                Location = new Point(10, 20),
                 Size = new Size(460, 24),
                 Checked = false
             };
@@ -470,20 +453,20 @@ namespace NUpPdfPrinter
             _lblBackOffset = new Label
             {
                 Text = "Сдвиг оборота:",
-                Location = new Point(10, 55),
+                Location = new Point(10, 52),
                 AutoSize = true
             };
 
             _lblBackOffsetX = new Label
             {
                 Text = "X",
-                Location = new Point(120, 55),
+                Location = new Point(120, 52),
                 AutoSize = true
             };
 
             _numBackOffsetX = new NumericUpDown
             {
-                Location = new Point(138, 53),
+                Location = new Point(138, 50),
                 Size = new Size(60, 24),
                 Minimum = -10m,
                 Maximum = 10m,
@@ -496,7 +479,7 @@ namespace NUpPdfPrinter
             _lblBackOffsetXmm = new Label
             {
                 Text = "мм",
-                Location = new Point(203, 55),
+                Location = new Point(203, 52),
                 AutoSize = true,
                 ForeColor = Color.DimGray
             };
@@ -504,13 +487,13 @@ namespace NUpPdfPrinter
             _lblBackOffsetY = new Label
             {
                 Text = "Y",
-                Location = new Point(240, 55),
+                Location = new Point(240, 52),
                 AutoSize = true
             };
 
             _numBackOffsetY = new NumericUpDown
             {
-                Location = new Point(258, 53),
+                Location = new Point(258, 50),
                 Size = new Size(60, 24),
                 Minimum = -10m,
                 Maximum = 10m,
@@ -523,7 +506,7 @@ namespace NUpPdfPrinter
             _lblBackOffsetYmm = new Label
             {
                 Text = "мм",
-                Location = new Point(323, 55),
+                Location = new Point(323, 52),
                 AutoSize = true,
                 ForeColor = Color.DimGray
             };
@@ -545,14 +528,14 @@ namespace NUpPdfPrinter
         }
 
         // ====================================================================
-        //  Группа «Раскладка листа» (508, 182, 480 × 240)
+        //  Группа «Раскладка листа» — 508, 142, 480 × 240
         // ====================================================================
         private void BuildGroupLayout()
         {
             var grp = new GroupBox
             {
                 Text = "Раскладка листа",
-                Location = new Point(508, 182),
+                Location = new Point(508, 142),
                 Size = new Size(480, 240)
             };
 
@@ -587,7 +570,7 @@ namespace NUpPdfPrinter
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
             _cmbPagesPerSheet.Items.AddRange(new object[] { 2, 3, 4, 6, 8, 9 });
-            _cmbPagesPerSheet.SelectedIndex = 2; // 4
+            _cmbPagesPerSheet.SelectedIndex = 2;
             _cmbPagesPerSheet.SelectedIndexChanged += (s, e) => UpdatePreviewText();
 
             _lblOrientation = new Label
@@ -660,6 +643,21 @@ namespace NUpPdfPrinter
                 ForeColor = Color.DimGray
             };
 
+            _chkParallelRendering = new CheckBox
+            {
+                Text = "Многопоточный рендер (быстрее на многоядерных CPU)",
+                Location = new Point(10, 187),
+                Size = new Size(440, 24),
+                Checked = false
+            };
+            _chkParallelRendering.CheckedChanged += (s, e) => UpdatePreviewText();
+
+            var tipPar = new ToolTip();
+            tipPar.SetToolTip(_chkParallelRendering,
+                "Параллельно рендерит страницы PDF одного листа в пуле потоков.\r\n" +
+                "Ускорение 3–6× на многоядерных машинах.\r\n" +
+                "Отключите, если наблюдаются проблемы или на одноядерном CPU.");
+
             var tipPad = new ToolTip();
             tipPad.SetToolTip(_numPadding,
                 "Отступ вокруг каждой страницы внутри её ячейки.\r\n" +
@@ -671,27 +669,28 @@ namespace NUpPdfPrinter
                 _lblPagesPerSheet, _cmbPagesPerSheet,
                 _lblOrientation, _cmbOrientation,
                 _lblCellOrientation, _cmbCellOrientation,
-                _lblPadding, _numPadding, _lblPaddingMm
+                _lblPadding, _numPadding, _lblPaddingMm,
+                _chkParallelRendering
             });
             Controls.Add(grp);
         }
 
         // ====================================================================
-        //  Группа «Отступы от края A4» (508, 432, 480 × 160)
+        //  Группа «Отступы от края A4» — 508, 388, 480 × 130
         // ====================================================================
         private void BuildGroupMargins()
         {
             var grp = new GroupBox
             {
                 Text = "Отступы от края листа A4",
-                Location = new Point(508, 432),
-                Size = new Size(480, 160)
+                Location = new Point(508, 388),
+                Size = new Size(480, 130)
             };
 
             _chkSameMargins = new CheckBox
             {
                 Text = "Одинаковые со всех сторон",
-                Location = new Point(10, 22),
+                Location = new Point(10, 20),
                 Size = new Size(460, 24),
                 Checked = true
             };
@@ -700,12 +699,12 @@ namespace NUpPdfPrinter
             _lblMarginLeft = new Label
             {
                 Text = "Слева:",
-                Location = new Point(10, 58),
+                Location = new Point(10, 52),
                 AutoSize = true
             };
             _numMarginLeft = new NumericUpDown
             {
-                Location = new Point(65, 55),
+                Location = new Point(65, 49),
                 Size = new Size(65, 24),
                 Minimum = 0m,
                 Maximum = 30m,
@@ -717,7 +716,7 @@ namespace NUpPdfPrinter
             _lblMarginLeftMm = new Label
             {
                 Text = "мм",
-                Location = new Point(135, 58),
+                Location = new Point(135, 52),
                 AutoSize = true,
                 ForeColor = Color.DimGray
             };
@@ -725,12 +724,12 @@ namespace NUpPdfPrinter
             _lblMarginTop = new Label
             {
                 Text = "Сверху:",
-                Location = new Point(185, 58),
+                Location = new Point(185, 52),
                 AutoSize = true
             };
             _numMarginTop = new NumericUpDown
             {
-                Location = new Point(250, 55),
+                Location = new Point(250, 49),
                 Size = new Size(65, 24),
                 Minimum = 0m,
                 Maximum = 30m,
@@ -743,7 +742,7 @@ namespace NUpPdfPrinter
             _lblMarginTopMm = new Label
             {
                 Text = "мм",
-                Location = new Point(320, 58),
+                Location = new Point(320, 52),
                 AutoSize = true,
                 ForeColor = Color.DimGray
             };
@@ -751,12 +750,12 @@ namespace NUpPdfPrinter
             _lblMarginRight = new Label
             {
                 Text = "Справа:",
-                Location = new Point(10, 91),
+                Location = new Point(10, 83),
                 AutoSize = true
             };
             _numMarginRight = new NumericUpDown
             {
-                Location = new Point(65, 88),
+                Location = new Point(65, 80),
                 Size = new Size(65, 24),
                 Minimum = 0m,
                 Maximum = 30m,
@@ -769,7 +768,7 @@ namespace NUpPdfPrinter
             _lblMarginRightMm = new Label
             {
                 Text = "мм",
-                Location = new Point(135, 91),
+                Location = new Point(135, 83),
                 AutoSize = true,
                 ForeColor = Color.DimGray
             };
@@ -777,12 +776,12 @@ namespace NUpPdfPrinter
             _lblMarginBottom = new Label
             {
                 Text = "Снизу:",
-                Location = new Point(185, 91),
+                Location = new Point(185, 83),
                 AutoSize = true
             };
             _numMarginBottom = new NumericUpDown
             {
-                Location = new Point(250, 88),
+                Location = new Point(250, 80),
                 Size = new Size(65, 24),
                 Minimum = 0m,
                 Maximum = 30m,
@@ -795,7 +794,7 @@ namespace NUpPdfPrinter
             _lblMarginBottomMm = new Label
             {
                 Text = "мм",
-                Location = new Point(320, 91),
+                Location = new Point(320, 83),
                 AutoSize = true,
                 ForeColor = Color.DimGray
             };
@@ -827,15 +826,15 @@ namespace NUpPdfPrinter
         }
 
         // ====================================================================
-        //  Группа «Кэш страниц» (508, 602, 480 × 85)
+        //  Группа «Кэш страниц» — 508, 524, 480 × 75
         // ====================================================================
         private void BuildGroupCache()
         {
             var grp = new GroupBox
             {
                 Text = "Кэш страниц",
-                Location = new Point(508, 602),
-                Size = new Size(480, 85)
+                Location = new Point(508, 524),
+                Size = new Size(480, 75)
             };
 
             _lblCache = new Label
@@ -860,7 +859,7 @@ namespace NUpPdfPrinter
                 "192 МБ",
                 "384 МБ"
             });
-            _cmbCacheBudget.SelectedIndex = 3;
+            _cmbCacheBudget.SelectedIndex = 2;
             _cmbCacheBudget.SelectedIndexChanged += async (s, e) =>
             {
                 if (_pdfPaths.Count > 0) await RebuildSourceAsync();
@@ -870,7 +869,7 @@ namespace NUpPdfPrinter
             {
                 Text = "Очистить кэш",
                 Location = new Point(320, 21),
-                Size = new Size(140, 28),
+                Size = new Size(140, 26),
                 Enabled = false
             };
             _btnClearCache.Click += BtnClearCache_Click;
@@ -890,10 +889,6 @@ namespace NUpPdfPrinter
         // ====================================================================
         //  Состояние «занято» и кнопки
         // ====================================================================
-        /// <summary>
-        /// Входит в состояние «занято»: курсор ожидания, кнопки блокируются.
-        /// Поддерживает счётчик, чтобы вложенные операции работали корректно.
-        /// </summary>
         private void BeginBusy(string statusText = null)
         {
             _busyCount++;
@@ -902,7 +897,6 @@ namespace NUpPdfPrinter
             UpdateButtonsEnabled();
         }
 
-        /// <summary>Выходит из состояния «занято».</summary>
         private void EndBusy()
         {
             _busyCount = Math.Max(0, _busyCount - 1);
@@ -914,10 +908,6 @@ namespace NUpPdfPrinter
             UpdateButtonsEnabled();
         }
 
-        /// <summary>
-        /// Синхронизирует Enabled у всех кнопок с текущим состоянием:
-        /// занятость + наличие источника + выделение в списке файлов.
-        /// </summary>
         private void UpdateButtonsEnabled()
         {
             bool idle = !IsBusy;
@@ -935,7 +925,6 @@ namespace NUpPdfPrinter
             _btnClearCache.Enabled = idle && hasSource;
         }
 
-        /// <summary>Показывает имя PDF и число страниц в шапке группы файлов.</summary>
         private void UpdateFileLabel()
         {
             if (_source == null || _pageCount == 0)
@@ -957,11 +946,6 @@ namespace NUpPdfPrinter
         // ====================================================================
         //  Открытие PDF и пересборка источника
         // ====================================================================
-        /// <summary>
-        /// Асинхронно пересобирает CompositePageImageSource по текущему _pdfPaths.
-        /// Открытие всех PDF и подсчёт страниц выполняются в фоновом потоке.
-        /// Также обновляет список файлов и границы диапазона.
-        /// </summary>
         private async Task RebuildSourceAsync()
         {
             if (_pdfPaths.Count == 0)
@@ -1030,9 +1014,6 @@ namespace NUpPdfPrinter
             }
         }
 
-        /// <summary>
-        /// Перестраивает список файлов по уже известным данным — без повторного I/O.
-        /// </summary>
         private void RefreshFilesListFromCounts(string[] paths, int[] counts)
         {
             _lstFiles.BeginUpdate();
@@ -1096,7 +1077,6 @@ namespace NUpPdfPrinter
                 _lstFiles.SelectedIndex = Math.Min(idx, _pdfPaths.Count - 1);
         }
 
-        /// <summary>Перемещает выделенный файл вверх (−1) или вниз (+1) по списку.</summary>
         private async Task MoveSelectedFileAsync(int direction)
         {
             int idx = _lstFiles.SelectedIndex;
@@ -1179,12 +1159,12 @@ namespace NUpPdfPrinter
             switch (_cmbCacheBudget.SelectedIndex)
             {
                 case 0: return 0L;
-                case 1: return 32L * 1024 * 1024;
-                case 2: return 64L * 1024 * 1024;
-                case 3: return 96L * 1024 * 1024;
-                case 4: return 192L * 1024 * 1024;
-                case 5: return 384L * 1024 * 1024;
-                default: return 96L * 1024 * 1024;
+                case 1: return 16L * 1024 * 1024;
+                case 2: return 32L * 1024 * 1024;
+                case 3: return 64L * 1024 * 1024;
+                case 4: return 128L * 1024 * 1024;
+                case 5: return 256L * 1024 * 1024;
+                default: return 32L * 1024 * 1024;
             }
         }
 
@@ -1289,6 +1269,10 @@ namespace NUpPdfPrinter
                 " мм, Y = " + by.ToString("0.0") + " мм" +
                 (_chkRegistrationMarks.Checked
                     ? "  •  метки совмещения ВКЛ" : "") + "\r\n" +
+                "Рендер: " +
+                (_chkParallelRendering.Checked
+                    ? "многопоточный (" + Environment.ProcessorCount + " ядер)"
+                    : "однопоточный") + "\r\n" +
                 "Кэш страниц: " +
                 (_source.CacheBytes / (1024.0 * 1024.0)).ToString("0.0") + " МБ";
         }
@@ -1313,10 +1297,6 @@ namespace NUpPdfPrinter
         private double GetMarginBottomMm() => (double)_numMarginBottom.Value;
         private bool GetSheetLandscape() => _cmbOrientation.SelectedIndex == 1;
 
-        /// <summary>
-        /// Собирает NUpPrintDocument из текущих настроек UI.
-        /// Один и тот же метод используется и для предпросмотра, и для печати.
-        /// </summary>
         private NUpPrintDocument CreateDocument(bool duplex, bool longEdge)
         {
             int n = (int)_cmbPagesPerSheet.SelectedItem;
@@ -1336,6 +1316,7 @@ namespace NUpPdfPrinter
                 GetMarginBottomMm());
 
             doc.Landscape = GetSheetLandscape();
+            doc.ParallelRendering = _chkParallelRendering.Checked;
 
             if (_chkAllPages.Checked)
             {
@@ -1387,13 +1368,19 @@ namespace NUpPdfPrinter
             {
                 doc?.Dispose();
 
-                // Освобождение GDI+ после закрытия предпросмотра — в фоне,
-                // чтобы не морозить форму на секунду.
+                // Освобождаем нативные ресурсы ВСЕХ PDF сразу, не дожидаясь
+                // 30-секундного idle-таймаута.
+                try { _source?.ReleaseNativeResources(); } catch { }
+
                 await Task.Run(() =>
                 {
+                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                        System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                     GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
                     GC.WaitForPendingFinalizers();
                     GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+
+                    try { EmptyWorkingSet(GetCurrentProcess()); } catch { }
                 });
 
                 UpdatePreviewText();
@@ -1433,8 +1420,6 @@ namespace NUpPdfPrinter
                     BeginBusy("Печать…");
                     try
                     {
-                        // Print синхронен, но вынесем в Task.Run — UI не морозится
-                        // во время формирования спул-файла.
                         await Task.Run(() => doc.Print());
                     }
                     catch (System.Runtime.InteropServices.ExternalException ex)
@@ -1470,6 +1455,20 @@ namespace NUpPdfPrinter
             finally
             {
                 doc.Dispose();
+
+                try { _source?.ReleaseNativeResources(); } catch { }
+
+                await Task.Run(() =>
+                {
+                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                        System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+
+                    try { EmptyWorkingSet(GetCurrentProcess()); } catch { }
+                });
+
                 UpdatePreviewText();
             }
         }
@@ -1477,10 +1476,6 @@ namespace NUpPdfPrinter
         // ====================================================================
         //  Время жизни источника PDF
         // ====================================================================
-        /// <summary>
-        /// Освобождает PdfDocument и все закэшированные Bitmap-ы.
-        /// Вызывается при закрытии формы, переоткрытии PDF и очистке списка.
-        /// </summary>
         private void DisposeSource()
         {
             if (_source != null)

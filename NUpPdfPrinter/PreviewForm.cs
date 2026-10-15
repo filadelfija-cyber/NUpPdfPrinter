@@ -7,6 +7,12 @@ using System.Windows.Forms;
 
 namespace NUpPdfPrinter
 {
+    /// <summary>
+    /// Просмотрщик печати: одна сторона A4 за раз.
+    /// Память: один активный Bitmap листа (ping-pong 2 буфера
+    /// с лимитом 4 Мпикс каждый). Кэш источника очищается
+    /// при закрытии окна.
+    /// </summary>
     public sealed class PreviewForm : Form
     {
         private enum ZoomMode { FitPage, FitWidth, ActualSize }
@@ -38,22 +44,19 @@ namespace NUpPdfPrinter
         private bool _suppressNumEvent;
         private ZoomMode _zoomMode = ZoomMode.FitPage;
 
-        // Ping-pong буферы: один показывается, второй рендерится в фоне.
-        // Так картинка никогда не пропадает между навигациями.
         private readonly Bitmap[] _sheetBuffers = new Bitmap[2];
         private int _frontBuffer = 0;
         private int _backBuffer = 1;
         private int _bufferW, _bufferH;
 
-        // Защита от параллельного рендера и от обращения к disposed-ресурсам.
         private bool _isRendering;
         private bool _closing;
 
         public PreviewForm(
             NUpPrintDocument doc,
             IPageImageSource source,
-            int targetDpi = 120,
-            int sourceDpi = 120)
+            int targetDpi = 96,
+            int sourceDpi = 96)
         {
             _doc = doc ?? throw new ArgumentNullException(nameof(doc));
             _source = source ?? throw new ArgumentNullException(nameof(source));
@@ -87,7 +90,7 @@ namespace NUpPdfPrinter
         private void BuildUi()
         {
             Text = "Предпросмотр печати";
-            ClientSize = new Size(1000, 850);
+            ClientSize = new Size(1000, 750);
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(720, 600);
             Font = new Font("Segoe UI", 9F);
@@ -137,7 +140,12 @@ namespace NUpPdfPrinter
                 Text = "из " + _totalSheets
             };
 
-            var lblZoom = new Label { Location = new Point(390, 13), AutoSize = true, Text = "Масштаб:" };
+            var lblZoom = new Label
+            {
+                Location = new Point(390, 13),
+                AutoSize = true,
+                Text = "Масштаб:"
+            };
 
             _cmbZoom = new ComboBox
             {
@@ -145,7 +153,12 @@ namespace NUpPdfPrinter
                 Size = new Size(160, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
-            _cmbZoom.Items.AddRange(new object[] { "Страница целиком", "По ширине", "100%" });
+            _cmbZoom.Items.AddRange(new object[]
+            {
+                "Страница целиком",
+                "По ширине",
+                "100%"
+            });
             _cmbZoom.SelectedIndex = 0;
             _cmbZoom.SelectedIndexChanged += (s, e) =>
             {
@@ -208,7 +221,7 @@ namespace NUpPdfPrinter
         }
 
         // ====================================================================
-        //  Ping-pong буферы
+        //  Ping-pong буферы (лимит 4 Мпикс)
         // ====================================================================
         private void EnsureSheetBuffers()
         {
@@ -219,8 +232,18 @@ namespace NUpPdfPrinter
             int pxW = Math.Max(1, (int)Math.Round(w / 100.0 * _targetDpi));
             int pxH = Math.Max(1, (int)Math.Round(h / 100.0 * _targetDpi));
 
-            if (_sheetBuffers[0] != null
-                && _bufferW == pxW && _bufferH == pxH)
+            // Лимит 4 Мпикс на буфер: A4 @ 96 DPI = 0.86 Мпикс,
+            // A4 @ 150 DPI = 2.1 Мпикс — влезает с большим запасом.
+            const long MaxPixels = 4_000_000L;
+            long pixels = (long)pxW * pxH;
+            if (pixels > MaxPixels)
+            {
+                double k = Math.Sqrt((double)MaxPixels / pixels);
+                pxW = Math.Max(1, (int)(pxW * k));
+                pxH = Math.Max(1, (int)(pxH * k));
+            }
+
+            if (_sheetBuffers[0] != null && _bufferW == pxW && _bufferH == pxH)
                 return;
 
             for (int i = 0; i < 2; i++)
@@ -302,7 +325,7 @@ namespace NUpPdfPrinter
             if (index < 0) index = 0;
             if (index >= _totalSheets) index = _totalSheets - 1;
             if (index == _currentIndex) return;
-            if (_isRendering) return;   // игнорируем клики во время рендера
+            if (_isRendering) return;
 
             _currentIndex = index;
             RenderCurrentAsync();
@@ -320,11 +343,6 @@ namespace NUpPdfPrinter
         // ====================================================================
         //  Асинхронный рендер
         // ====================================================================
-        /// <summary>
-        /// Рендерит текущий лист в фоновом потоке.
-        /// Результат кладётся в задний буфер, затем буферы меняются местами —
-        /// картинка не пропадает во время рендера.
-        /// </summary>
         private async void RenderCurrentAsync()
         {
             if (_isRendering || _closing) return;
@@ -349,7 +367,6 @@ namespace NUpPdfPrinter
 
                 if (_closing) return;
 
-                // Swap front/back и присвоить картинку.
                 int tmp = _frontBuffer;
                 _frontBuffer = _backBuffer;
                 _backBuffer = tmp;
@@ -379,7 +396,8 @@ namespace NUpPdfPrinter
                     _numPage.Value = _currentIndex + 1;
                     _suppressNumEvent = false;
 
-                    Text = "Предпросмотр — лист " + (_currentIndex + 1) + " из " + _totalSheets;
+                    Text = "Предпросмотр — лист " + (_currentIndex + 1) +
+                           " из " + _totalSheets;
 
                     UpdatePagesLabel();
                     OnCacheTimerTick(this, EventArgs.Empty);
@@ -387,7 +405,6 @@ namespace NUpPdfPrinter
             }
         }
 
-        /// <summary>Обновляет строку «PDF-страницы на листе».</summary>
         private void UpdatePagesLabel()
         {
             try
@@ -437,8 +454,18 @@ namespace NUpPdfPrinter
                 }
             }
 
+            // Освобождаем нативные ресурсы ВСЕХ источников.
+            // Это закрывает PdfDocument, чистит кэш страниц и кэш размеров.
+            try { _source.ReleaseNativeResources(); } catch { }
+
+            // Компактизация LOH + двойной GC возвращают память ОС.
+            System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+
             base.OnFormClosed(e);
-            // _source и _doc НЕ dispose'им — ими владеет MainForm.
         }
     }
 }

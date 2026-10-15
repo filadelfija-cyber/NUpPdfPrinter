@@ -6,26 +6,18 @@ namespace NUpPdfPrinter
 {
     /// <summary>
     /// Объединяет несколько IPageImageSource в один «виртуальный документ»:
-    /// страницы нумеруются сквозным образом через все файлы по порядку добавления.
-    ///
-    /// Все механизмы NUpPrintDocument (диапазон страниц, дуплекс, N-up,
-    /// предпросмотр, кэш) работают с глобальными номерами страниц этого
-    /// источника и не знают, сколько внутри файлов.
+    /// сквозная нумерация страниц через все файлы по порядку добавления.
+    /// Все механизмы NUpPrintDocument работают с глобальными номерами страниц
+    /// и не знают, сколько внутри файлов.
     /// </summary>
     public sealed class CompositePageImageSource : IPageImageSource
     {
         private readonly List<IPageImageSource> _sources = new List<IPageImageSource>();
-
-        /// <summary>Глобальный индекс первой страницы каждого источника.</summary>
         private readonly List<int> _startIndices = new List<int>();
 
         private int _totalPages;
         private bool _disposed;
 
-        /// <summary>
-        /// Добавить документ в конец виртуального списка.
-        /// Вызывать до первого GetPage — после начала работы список не меняется.
-        /// </summary>
         public void Add(IPageImageSource source)
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
@@ -38,7 +30,6 @@ namespace NUpPdfPrinter
 
         public int PageCount => _totalPages;
 
-        /// <summary>Суммарный объём кэша всех вложенных источников.</summary>
         public long CacheBytes
         {
             get
@@ -46,8 +37,7 @@ namespace NUpPdfPrinter
                 long total = 0;
                 foreach (var s in _sources)
                 {
-                    try { total += s.CacheBytes; }
-                    catch { /* источник мог быть закрыт */ }
+                    try { total += s.CacheBytes; } catch { }
                 }
                 return total;
             }
@@ -69,6 +59,24 @@ namespace NUpPdfPrinter
             foreach (var s in _sources) s.ClearCache();
         }
 
+        public void ReleaseNativeResources()
+        {
+            foreach (var s in _sources)
+            {
+                try { s.ReleaseNativeResources(); } catch { }
+            }
+        }
+
+        public IDisposable SuppressEviction()
+        {
+            var handles = new List<IDisposable>(_sources.Count);
+            foreach (var s in _sources)
+            {
+                try { handles.Add(s.SuppressEviction()); } catch { }
+            }
+            return new CompositeHandle(handles);
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
@@ -83,10 +91,6 @@ namespace NUpPdfPrinter
             _totalPages = 0;
         }
 
-        /// <summary>
-        /// Находит индекс источника, которому принадлежит глобальная страница index.
-        /// Линейный поиск с конца — файлов обычно немного.
-        /// </summary>
         private int FindSourceIndex(int index)
         {
             for (int i = _sources.Count - 1; i >= 0; i--)
@@ -94,6 +98,21 @@ namespace NUpPdfPrinter
                 if (_startIndices[i] <= index) return i;
             }
             return 0;
+        }
+
+        private sealed class CompositeHandle : IDisposable
+        {
+            private List<IDisposable> _handles;
+            public CompositeHandle(List<IDisposable> handles) { _handles = handles; }
+            public void Dispose()
+            {
+                var list = System.Threading.Interlocked.Exchange(ref _handles, null);
+                if (list == null) return;
+                foreach (var h in list)
+                {
+                    try { h.Dispose(); } catch { }
+                }
+            }
         }
     }
 }
