@@ -2,18 +2,11 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace NUpPdfPrinter
 {
-    /// <summary>
-    /// Просмотрщик печати: одна сторона A4 за раз.
-    /// Поддерживает режимы отображения:
-    ///   «Страница целиком» — вписывает лист в окно;
-    ///   «По ширине»         — масштабирует по ширине окна с прокруткой;
-    ///   «100%»              — 1:1 к битмапу листа с прокруткой.
-    /// Источник PDF НЕ dispose'ится — им владеет MainForm.
-    /// </summary>
     public sealed class PreviewForm : Form
     {
         private enum ZoomMode { FitPage, FitWidth, ActualSize }
@@ -28,7 +21,6 @@ namespace NUpPdfPrinter
         private PictureBox _picture;
         private Panel _navPanel;
         private Panel _infoPanel;
-
         private Button _btnFirst;
         private Button _btnPrev;
         private Button _btnNext;
@@ -37,23 +29,31 @@ namespace NUpPdfPrinter
         private NumericUpDown _numPage;
         private Label _lblOf;
         private Label _lblCache;
+        private Label _lblMemory;
         private Label _lblPages;
         private ComboBox _cmbZoom;
         private Timer _cacheTimer;
 
         private int _currentIndex;
-        private Bitmap _currentBitmap;
         private bool _suppressNumEvent;
-        private bool _suppressZoomEvent;
         private ZoomMode _zoomMode = ZoomMode.FitPage;
-        private Bitmap _sheetBuffer;
-        private int _sheetBufferW, _sheetBufferH;
+
+        // Ping-pong буферы: один показывается, второй рендерится в фоне.
+        // Так картинка никогда не пропадает между навигациями.
+        private readonly Bitmap[] _sheetBuffers = new Bitmap[2];
+        private int _frontBuffer = 0;
+        private int _backBuffer = 1;
+        private int _bufferW, _bufferH;
+
+        // Защита от параллельного рендера и от обращения к disposed-ресурсам.
+        private bool _isRendering;
+        private bool _closing;
 
         public PreviewForm(
             NUpPrintDocument doc,
             IPageImageSource source,
-            int targetDpi = 150,
-            int sourceDpi = 150)
+            int targetDpi = 120,
+            int sourceDpi = 120)
         {
             _doc = doc ?? throw new ArgumentNullException(nameof(doc));
             _source = source ?? throw new ArgumentNullException(nameof(source));
@@ -73,7 +73,8 @@ namespace NUpPdfPrinter
                 _btnClose.Left = Math.Max(0, _navPanel.ClientSize.Width - _btnClose.Width - 8);
             };
 
-            RenderCurrent();
+            EnsureSheetBuffers();
+            RenderCurrentAsync();
 
             _cacheTimer = new Timer { Interval = 500 };
             _cacheTimer.Tick += OnCacheTimerTick;
@@ -91,13 +92,7 @@ namespace NUpPdfPrinter
             MinimumSize = new Size(720, 600);
             Font = new Font("Segoe UI", 9F);
 
-            // ---------- панель информации о страницах листа ----------
-            _infoPanel = new Panel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 26
-            };
-
+            _infoPanel = new Panel { Dock = DockStyle.Bottom, Height = 26 };
             _lblPages = new Label
             {
                 Dock = DockStyle.Fill,
@@ -108,12 +103,7 @@ namespace NUpPdfPrinter
             };
             _infoPanel.Controls.Add(_lblPages);
 
-            // ---------- панель навигации ----------
-            _navPanel = new Panel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 44
-            };
+            _navPanel = new Panel { Dock = DockStyle.Bottom, Height = 44 };
 
             _btnFirst = new Button { Text = "|<", Location = new Point(8, 8), Size = new Size(40, 28) };
             _btnPrev = new Button { Text = "<", Location = new Point(52, 8), Size = new Size(40, 28) };
@@ -147,12 +137,7 @@ namespace NUpPdfPrinter
                 Text = "из " + _totalSheets
             };
 
-            var lblZoom = new Label
-            {
-                Location = new Point(390, 13),
-                AutoSize = true,
-                Text = "Масштаб:"
-            };
+            var lblZoom = new Label { Location = new Point(390, 13), AutoSize = true, Text = "Масштаб:" };
 
             _cmbZoom = new ComboBox
             {
@@ -160,16 +145,10 @@ namespace NUpPdfPrinter
                 Size = new Size(160, 24),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
-            _cmbZoom.Items.AddRange(new object[]
-            {
-                "Страница целиком",
-                "По ширине",
-                "100%"
-            });
+            _cmbZoom.Items.AddRange(new object[] { "Страница целиком", "По ширине", "100%" });
             _cmbZoom.SelectedIndex = 0;
             _cmbZoom.SelectedIndexChanged += (s, e) =>
             {
-                if (_suppressZoomEvent) return;
                 _zoomMode = (ZoomMode)_cmbZoom.SelectedIndex;
                 ApplyZoomMode();
             };
@@ -180,6 +159,14 @@ namespace NUpPdfPrinter
                 AutoSize = true,
                 ForeColor = Color.DimGray,
                 Text = "Кэш: —"
+            };
+
+            _lblMemory = new Label
+            {
+                Location = new Point(790, 13),
+                AutoSize = true,
+                ForeColor = Color.DimGray,
+                Text = "—"
             };
 
             _btnClose = new Button
@@ -196,10 +183,9 @@ namespace NUpPdfPrinter
                 _btnFirst, _btnPrev, _btnNext, _btnLast,
                 _numPage, _lblOf,
                 lblZoom, _cmbZoom,
-                _lblCache, _btnClose
+                _lblCache, _lblMemory, _btnClose
             });
 
-            // ---------- область просмотра ----------
             _scrollPanel = new Panel
             {
                 Dock = DockStyle.Fill,
@@ -216,25 +202,45 @@ namespace NUpPdfPrinter
 
             _scrollPanel.Controls.Add(_picture);
 
-            // Порядок добавления: Fill-элемент первым, Bottom-панели после.
             Controls.Add(_scrollPanel);
             Controls.Add(_infoPanel);
             Controls.Add(_navPanel);
-
-            // Начальный размер PictureBox для «целиком» — Dock Fill подстроит.
         }
 
         // ====================================================================
-        //  Масштабирование
+        //  Ping-pong буферы
         // ====================================================================
-        /// <summary>
-        /// Применяет выбранный режим масштабирования к PictureBox.
-        /// В режимах «По ширине» и «100%» картинка может быть больше окна —
-        /// тогда _scrollPanel показывает полосы прокрутки.
-        /// </summary>
+        private void EnsureSheetBuffers()
+        {
+            int w = _doc.DefaultPageSettings.PaperSize.Width;
+            int h = _doc.DefaultPageSettings.PaperSize.Height;
+            if (_doc.Landscape) { int t = w; w = h; h = t; }
+
+            int pxW = Math.Max(1, (int)Math.Round(w / 100.0 * _targetDpi));
+            int pxH = Math.Max(1, (int)Math.Round(h / 100.0 * _targetDpi));
+
+            if (_sheetBuffers[0] != null
+                && _bufferW == pxW && _bufferH == pxH)
+                return;
+
+            for (int i = 0; i < 2; i++)
+            {
+                _sheetBuffers[i]?.Dispose();
+                _sheetBuffers[i] = new Bitmap(pxW, pxH,
+                    System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+                _sheetBuffers[i].SetResolution(_targetDpi, _targetDpi);
+            }
+            _bufferW = pxW;
+            _bufferH = pxH;
+        }
+
+        // ====================================================================
+        //  Масштаб
+        // ====================================================================
         private void ApplyZoomMode()
         {
-            if (_currentBitmap == null) return;
+            var bmp = _sheetBuffers[_frontBuffer];
+            if (bmp == null) return;
 
             switch (_zoomMode)
             {
@@ -247,37 +253,45 @@ namespace NUpPdfPrinter
                     {
                         _picture.Dock = DockStyle.None;
                         _picture.SizeMode = PictureBoxSizeMode.StretchImage;
-
                         int w = Math.Max(1, _scrollPanel.ClientSize.Width - 4);
-                        int h = Math.Max(1,
-                            (int)Math.Round((double)_currentBitmap.Height *
-                                            w / _currentBitmap.Width));
+                        int h = Math.Max(1, (int)Math.Round((double)bmp.Height * w / bmp.Width));
                         _picture.Location = new Point(2, 2);
                         _picture.Size = new Size(w, h);
                         break;
                     }
 
                 case ZoomMode.ActualSize:
-                    {
-                        _picture.Dock = DockStyle.None;
-                        _picture.SizeMode = PictureBoxSizeMode.AutoSize;
-                        _picture.Location = new Point(2, 2);
-                        _picture.Size = _currentBitmap.Size;
-                        break;
-                    }
+                    _picture.Dock = DockStyle.None;
+                    _picture.SizeMode = PictureBoxSizeMode.AutoSize;
+                    _picture.Location = new Point(2, 2);
+                    _picture.Size = bmp.Size;
+                    break;
             }
         }
 
         // ====================================================================
-        //  Индикатор кэша
+        //  Индикаторы
         // ====================================================================
         private void OnCacheTimerTick(object sender, EventArgs e)
         {
             long bytes = 0;
-            try { bytes = _source.CacheBytes; } catch { /* источник мог быть закрыт */ }
+            try { bytes = _source.CacheBytes; } catch { }
 
             _lblCache.Text = "Кэш: " +
                 (bytes / (1024.0 * 1024.0)).ToString("0.0") + " МБ";
+
+            try
+            {
+                using (var p = System.Diagnostics.Process.GetCurrentProcess())
+                {
+                    p.Refresh();
+                    double ws = p.WorkingSet64 / (1024.0 * 1024.0);
+                    double heap = GC.GetTotalMemory(false) / (1024.0 * 1024.0);
+                    _lblMemory.Text = "WS: " + ws.ToString("0") +
+                                      " / heap: " + heap.ToString("0") + " МБ";
+                }
+            }
+            catch { }
         }
 
         // ====================================================================
@@ -288,105 +302,112 @@ namespace NUpPdfPrinter
             if (index < 0) index = 0;
             if (index >= _totalSheets) index = _totalSheets - 1;
             if (index == _currentIndex) return;
+            if (_isRendering) return;   // игнорируем клики во время рендера
 
             _currentIndex = index;
-            RenderCurrent();
+            RenderCurrentAsync();
         }
 
-        private void RenderCurrent()
+        private void SetNavEnabled(bool enabled)
         {
-            EnsureSheetBuffer();
+            _btnFirst.Enabled = enabled && _currentIndex > 0;
+            _btnPrev.Enabled = enabled && _currentIndex > 0;
+            _btnNext.Enabled = enabled && _currentIndex < _totalSheets - 1;
+            _btnLast.Enabled = enabled && _currentIndex < _totalSheets - 1;
+            _numPage.Enabled = enabled;
+        }
 
+        // ====================================================================
+        //  Асинхронный рендер
+        // ====================================================================
+        /// <summary>
+        /// Рендерит текущий лист в фоновом потоке.
+        /// Результат кладётся в задний буфер, затем буферы меняются местами —
+        /// картинка не пропадает во время рендера.
+        /// </summary>
+        private async void RenderCurrentAsync()
+        {
+            if (_isRendering || _closing) return;
+
+            _isRendering = true;
+            int idx = _currentIndex;
+            SetNavEnabled(false);
             Cursor = Cursors.WaitCursor;
+
             try
             {
-                _picture.Image = null;   // отсоединяем перед перерисовкой
-                _doc.RenderSheetInto(_sheetBuffer, _currentIndex, _sourceDpi);
-                _picture.Image = _sheetBuffer;
-                _picture.Invalidate();   // форсируем repaint, т.к. ссылка та же
+                EnsureSheetBuffers();
+                var backBmp = _sheetBuffers[_backBuffer];
+                var doc = _doc;
+                var srcDpi = _sourceDpi;
+
+                await Task.Run(() =>
+                {
+                    if (_closing) return;
+                    doc.RenderSheetInto(backBmp, idx, srcDpi);
+                });
+
+                if (_closing) return;
+
+                // Swap front/back и присвоить картинку.
+                int tmp = _frontBuffer;
+                _frontBuffer = _backBuffer;
+                _backBuffer = tmp;
+
+                _picture.Image = _sheetBuffers[_frontBuffer];
+                _picture.Invalidate();
                 ApplyZoomMode();
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this,
-                    "Не удалось отрисовать лист:\r\n" + ex.Message,
-                    "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!_closing)
+                {
+                    MessageBox.Show(this,
+                        "Не удалось отрисовать лист:\r\n" + ex.Message,
+                        "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
             finally
             {
-                Cursor = Cursors.Default;
+                if (!_closing)
+                {
+                    _isRendering = false;
+                    Cursor = Cursors.Default;
+                    SetNavEnabled(true);
+
+                    _suppressNumEvent = true;
+                    _numPage.Value = _currentIndex + 1;
+                    _suppressNumEvent = false;
+
+                    Text = "Предпросмотр — лист " + (_currentIndex + 1) + " из " + _totalSheets;
+
+                    UpdatePagesLabel();
+                    OnCacheTimerTick(this, EventArgs.Empty);
+                }
             }
-
-            _suppressNumEvent = true;
-            _numPage.Value = _currentIndex + 1;
-            _suppressNumEvent = false;
-
-            _btnFirst.Enabled = _btnPrev.Enabled = _currentIndex > 0;
-            _btnNext.Enabled = _btnLast.Enabled = _currentIndex < _totalSheets - 1;
-
-            Text = "Предпросмотр — лист " + (_currentIndex + 1) + " из " + _totalSheets;
-
-            UpdatePagesLabel();
-            OnCacheTimerTick(this, EventArgs.Empty);
         }
 
-        /// <summary>
-        /// Обновляет подпись под навигацией: какие PDF-страницы попали
-        /// в текущий лист, в порядке ячеек (слева-направо, сверху-вниз).
-        /// </summary>
+        /// <summary>Обновляет строку «PDF-страницы на листе».</summary>
         private void UpdatePagesLabel()
         {
             try
             {
                 int[] pages = _doc.GetSheetPageNumbers(_currentIndex);
-
                 var sb = new StringBuilder();
                 sb.Append("PDF-страницы на листе (по ячейкам): ");
-
                 int shown = 0;
                 for (int i = 0; i < pages.Length; i++)
                 {
                     if (pages[i] < 0) continue;
-
                     if (shown > 0) sb.Append(", ");
-                    sb.Append(pages[i] + 1);   // 1-based для пользователя
+                    sb.Append(pages[i] + 1);
                     shown++;
                 }
-
-                if (shown == 0)
-                    sb.Append("нет");
-                else
-                    sb.Append("   (всего ").Append(shown).Append(")");
-
+                if (shown == 0) sb.Append("нет");
+                else sb.Append("   (всего ").Append(shown).Append(")");
                 _lblPages.Text = sb.ToString();
             }
-            catch
-            {
-                _lblPages.Text = "";
-            }
-        }
-
-        private void EnsureSheetBuffer()
-        {
-            int w = _doc.DefaultPageSettings.PaperSize.Width;
-            int h = _doc.DefaultPageSettings.PaperSize.Height;
-            if (_doc.Landscape) { int t = w; w = h; h = t; }
-
-            int pxW = Math.Max(1, (int)Math.Round(w / 100.0 * _targetDpi));
-            int pxH = Math.Max(1, (int)Math.Round(h / 100.0 * _targetDpi));
-
-            if (_sheetBuffer == null || _sheetBufferW != pxW || _sheetBufferH != pxH)
-            {
-                if (_sheetBuffer != null)
-                {
-                    _picture.Image = null;
-                    _sheetBuffer.Dispose();
-                }
-                _sheetBuffer = new Bitmap(pxW, pxH, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
-                _sheetBuffer.SetResolution(_targetDpi, _targetDpi);
-                _sheetBufferW = pxW;
-                _sheetBufferH = pxH;
-            }
+            catch { _lblPages.Text = ""; }
         }
 
         // ====================================================================
@@ -394,6 +415,8 @@ namespace NUpPdfPrinter
         // ====================================================================
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            _closing = true;
+
             if (_cacheTimer != null)
             {
                 _cacheTimer.Stop();
@@ -405,10 +428,13 @@ namespace NUpPdfPrinter
             if (_picture != null)
                 _picture.Image = null;
 
-            if (_sheetBuffer != null)
+            for (int i = 0; i < 2; i++)
             {
-                _sheetBuffer.Dispose();
-                _sheetBuffer = null;
+                if (_sheetBuffers[i] != null)
+                {
+                    _sheetBuffers[i].Dispose();
+                    _sheetBuffers[i] = null;
+                }
             }
 
             base.OnFormClosed(e);

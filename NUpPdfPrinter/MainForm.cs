@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Printing;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace NUpPdfPrinter
@@ -10,6 +11,13 @@ namespace NUpPdfPrinter
     /// <summary>
     /// Главная форма приложения: список PDF-документов, N-up настройки,
     /// предпросмотр и печать.
+    ///
+    /// Отзывчивость UI:
+    ///   • Открытие и переоткрытие PDF — в фоне через Task.Run.
+    ///   • Очистка кэша и GC — в фоне.
+    ///   • Печать — в фоне (doc.Print в Task.Run).
+    ///   • Все потенциально долгие операции сопровождаются состоянием
+    ///     «занято»: курсор ожидания, кнопки disabled.
     ///
     /// Компоновка: 1000 × 750, две колонки групп.
     /// Сверху во всю ширину — список PDF-файлов с кнопками управления.
@@ -28,6 +36,11 @@ namespace NUpPdfPrinter
         private bool _suppressRangeUpdate;
         private bool _suppressMarginSync;
 
+        // Счётчик активных фоновых операций. Пока > 0 — UI в состоянии
+        // «занято»: курсор ожидания, кнопки заблокированы.
+        private int _busyCount;
+        private bool IsBusy => _busyCount > 0;
+
         // ====================================================================
         //  UI-элементы
         // ====================================================================
@@ -39,6 +52,7 @@ namespace NUpPdfPrinter
         private Button _btnMoveDown;
         private Button _btnClearFiles;
         private Label _lblFilesHint;
+        private Label _lblFile;
 
         // Группа «Страницы для печати»
         private CheckBox _chkAllPages;
@@ -171,6 +185,8 @@ namespace NUpPdfPrinter
             _btnPrint.Click += BtnPrint_Click;
 
             Controls.AddRange(new Control[] { _btnPreview, _btnExit, _btnPrint });
+
+            UpdateButtonsEnabled();
         }
 
         // ====================================================================
@@ -185,30 +201,40 @@ namespace NUpPdfPrinter
                 Size = new Size(976, 160)
             };
 
+            _lblFile = new Label
+            {
+                Text = "Файлы не выбраны",
+                Location = new Point(10, 20),
+                Size = new Size(700, 20),
+                AutoSize = false,
+                AutoEllipsis = true,
+                ForeColor = Color.FromArgb(60, 60, 60)
+            };
+
             _lstFiles = new ListBox
             {
-                Location = new Point(10, 22),
-                Size = new Size(700, 125),
+                Location = new Point(10, 44),
+                Size = new Size(700, 106),
                 SelectionMode = SelectionMode.One,
                 IntegralHeight = false,
                 HorizontalScrollbar = true
             };
-            _lstFiles.SelectedIndexChanged += (s, e) => UpdateFileButtons();
-            _lstFiles.DoubleClick += (s, e) => BtnRemovePdf_Click(s, e);
+            _lstFiles.SelectedIndexChanged += (s, e) => UpdateButtonsEnabled();
+            _lstFiles.DoubleClick += BtnRemovePdf_Click;
 
             _btnAddPdf = new Button
             {
                 Text = "Добавить PDF…",
-                Location = new Point(720, 22),
-                Size = new Size(90, 28)
+                Location = new Point(720, 44),
+                Size = new Size(120, 28)
             };
             _btnAddPdf.Click += BtnAddPdf_Click;
 
             _btnRemovePdf = new Button
             {
                 Text = "Удалить",
-                Location = new Point(815, 22),
-                Size = new Size(90, 28),
+                Location = new Point(848, 44),
+                Size = new Size(118, 28),
                 Enabled = false
             };
             _btnRemovePdf.Click += BtnRemovePdf_Click;
@@ -216,44 +242,43 @@ namespace NUpPdfPrinter
             _btnMoveUp = new Button
             {
                 Text = "Вверх",
-                Location = new Point(720, 55),
-                Size = new Size(90, 28),
+                Location = new Point(720, 78),
+                Size = new Size(120, 28),
                 Enabled = false
             };
-            _btnMoveUp.Click += (s, e) => MoveSelectedFile(-1);
+            _btnMoveUp.Click += async (s, e) => await MoveSelectedFileAsync(-1);
 
             _btnMoveDown = new Button
             {
                 Text = "Вниз",
-                Location = new Point(815, 55),
-                Size = new Size(90, 28),
+                Location = new Point(848, 78),
+                Size = new Size(118, 28),
                 Enabled = false
             };
-            _btnMoveDown.Click += (s, e) => MoveSelectedFile(+1);
+            _btnMoveDown.Click += async (s, e) => await MoveSelectedFileAsync(+1);
 
             _btnClearFiles = new Button
             {
                 Text = "Очистить список",
-                Location = new Point(720, 88),
-                Size = new Size(185, 28),
+                Location = new Point(720, 112),
+                Size = new Size(246, 28),
                 Enabled = false
             };
             _btnClearFiles.Click += BtnClearFiles_Click;
 
             _lblFilesHint = new Label
             {
-                Text = "Двойной клик по файлу — удалить.\r\n" +
-                            "Страницы нумеруются сквозным образом\r\n" +
-                            "по порядку списка.",
-                Location = new Point(720, 120),
-                Size = new Size(200, 40),
+                Text = "Двойной клик по файлу — удалить. " +
+                            "Страницы нумеруются сквозным образом по порядку списка.",
+                Location = new Point(10, 152),
+                Size = new Size(700, 16),
                 ForeColor = Color.DimGray,
                 Font = new Font("Segoe UI", 8F)
             };
 
             grp.Controls.AddRange(new Control[]
             {
-                _lstFiles,
+                _lblFile, _lstFiles,
                 _btnAddPdf, _btnRemovePdf,
                 _btnMoveUp, _btnMoveDown,
                 _btnClearFiles, _lblFilesHint
@@ -836,9 +861,9 @@ namespace NUpPdfPrinter
                 "384 МБ"
             });
             _cmbCacheBudget.SelectedIndex = 3;
-            _cmbCacheBudget.SelectedIndexChanged += (s, e) =>
+            _cmbCacheBudget.SelectedIndexChanged += async (s, e) =>
             {
-                if (_pdfPaths.Count > 0) RebuildSourceWithUiFeedback();
+                if (_pdfPaths.Count > 0) await RebuildSourceAsync();
             };
 
             _btnClearCache = new Button
@@ -863,13 +888,180 @@ namespace NUpPdfPrinter
         }
 
         // ====================================================================
-        //  Управление списком файлов
+        //  Состояние «занято» и кнопки
         // ====================================================================
         /// <summary>
-        /// Добавляет один или несколько PDF-файлов в список.
-        /// Может выбрать сразу несколько через MultiSelect.
+        /// Входит в состояние «занято»: курсор ожидания, кнопки блокируются.
+        /// Поддерживает счётчик, чтобы вложенные операции работали корректно.
         /// </summary>
-        private void BtnAddPdf_Click(object sender, EventArgs e)
+        private void BeginBusy(string statusText = null)
+        {
+            _busyCount++;
+            Cursor = Cursors.WaitCursor;
+            if (statusText != null) _lblFile.Text = statusText;
+            UpdateButtonsEnabled();
+        }
+
+        /// <summary>Выходит из состояния «занято».</summary>
+        private void EndBusy()
+        {
+            _busyCount = Math.Max(0, _busyCount - 1);
+            if (!IsBusy)
+            {
+                Cursor = Cursors.Default;
+                UpdateFileLabel();
+            }
+            UpdateButtonsEnabled();
+        }
+
+        /// <summary>
+        /// Синхронизирует Enabled у всех кнопок с текущим состоянием:
+        /// занятость + наличие источника + выделение в списке файлов.
+        /// </summary>
+        private void UpdateButtonsEnabled()
+        {
+            bool idle = !IsBusy;
+            bool hasSource = _source != null;
+            int idx = _lstFiles.SelectedIndex;
+            int cnt = _pdfPaths.Count;
+
+            _btnAddPdf.Enabled = idle;
+            _btnRemovePdf.Enabled = idle && idx >= 0;
+            _btnMoveUp.Enabled = idle && idx > 0;
+            _btnMoveDown.Enabled = idle && idx >= 0 && idx < cnt - 1;
+            _btnClearFiles.Enabled = idle && cnt > 0;
+            _btnPrint.Enabled = idle && hasSource;
+            _btnPreview.Enabled = idle && hasSource;
+            _btnClearCache.Enabled = idle && hasSource;
+        }
+
+        /// <summary>Показывает имя PDF и число страниц в шапке группы файлов.</summary>
+        private void UpdateFileLabel()
+        {
+            if (_source == null || _pageCount == 0)
+            {
+                _lblFile.Text = _pdfPaths.Count == 0
+                    ? "Файлы не выбраны"
+                    : "Загрузка не удалась";
+            }
+            else if (_pdfPaths.Count == 1)
+            {
+                _lblFile.Text = Path.GetFileName(_pdfPaths[0]) + " — " + _pageCount + " стр.";
+            }
+            else
+            {
+                _lblFile.Text = _pdfPaths.Count + " файлов — " + _pageCount + " стр.";
+            }
+        }
+
+        // ====================================================================
+        //  Открытие PDF и пересборка источника
+        // ====================================================================
+        /// <summary>
+        /// Асинхронно пересобирает CompositePageImageSource по текущему _pdfPaths.
+        /// Открытие всех PDF и подсчёт страниц выполняются в фоновом потоке.
+        /// Также обновляет список файлов и границы диапазона.
+        /// </summary>
+        private async Task RebuildSourceAsync()
+        {
+            if (_pdfPaths.Count == 0)
+            {
+                DisposeSource();
+                _pageCount = 0;
+                _lstFiles.Items.Clear();
+                _lblPreview.Text = string.Empty;
+                UpdateFileLabel();
+                UpdateButtonsEnabled();
+                return;
+            }
+
+            var paths = _pdfPaths.ToArray();
+            long budget = GetCacheBudgetBytes();
+
+            BeginBusy("Загрузка PDF…");
+            try
+            {
+                var result = await Task.Run(() =>
+                {
+                    var composite = new CompositePageImageSource();
+                    var counts = new int[paths.Length];
+                    try
+                    {
+                        for (int i = 0; i < paths.Length; i++)
+                        {
+                            var pdf = new PdfPageImageSource(paths[i], budget);
+                            counts[i] = pdf.PageCount;
+                            composite.Add(pdf);
+                        }
+                        return (source: (IPageImageSource)composite, counts);
+                    }
+                    catch
+                    {
+                        composite.Dispose();
+                        throw;
+                    }
+                });
+
+                DisposeSource();
+                _source = result.source;
+                _pageCount = _source.PageCount;
+
+                RefreshFilesListFromCounts(paths, result.counts);
+
+                _suppressRangeUpdate = true;
+                _numFirstPage.Maximum = Math.Max(1, _pageCount);
+                _numLastPage.Maximum = Math.Max(1, _pageCount);
+                _numFirstPage.Value = 1;
+                _numLastPage.Value = Math.Max(1, _pageCount);
+                _suppressRangeUpdate = false;
+
+                UpdateFileLabel();
+                UpdatePreviewText();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    "Не удалось открыть PDF:\r\n" + ex.Message,
+                    "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                EndBusy();
+            }
+        }
+
+        /// <summary>
+        /// Перестраивает список файлов по уже известным данным — без повторного I/O.
+        /// </summary>
+        private void RefreshFilesListFromCounts(string[] paths, int[] counts)
+        {
+            _lstFiles.BeginUpdate();
+            try
+            {
+                _lstFiles.Items.Clear();
+                int start = 0;
+                for (int i = 0; i < paths.Length; i++)
+                {
+                    int n = i < counts.Length ? counts[i] : 0;
+                    string range = n > 0
+                        ? "  (" + (start + 1) + "—" + (start + n) + ")"
+                        : "  (ошибка открытия)";
+                    _lstFiles.Items.Add(
+                        Path.GetFileName(paths[i]) + "  —  " + n + " стр." + range);
+                    start += n;
+                }
+            }
+            finally
+            {
+                _lstFiles.EndUpdate();
+                UpdateButtonsEnabled();
+            }
+        }
+
+        // ====================================================================
+        //  Обработчики управления списком файлов
+        // ====================================================================
+        private async void BtnAddPdf_Click(object sender, EventArgs e)
         {
             using (var ofd = new OpenFileDialog
             {
@@ -882,34 +1074,30 @@ namespace NUpPdfPrinter
 
                 foreach (var path in ofd.FileNames)
                 {
-                    // Дубликат по полному пути пропускаем.
                     if (_pdfPaths.Exists(p =>
                         string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
                         continue;
                     _pdfPaths.Add(path);
                 }
-
-                RebuildSourceWithUiFeedback();
-                RefreshFilesList();
             }
+
+            await RebuildSourceAsync();
         }
 
-        /// <summary>Удаляет выбранный файл из списка.</summary>
-        private void BtnRemovePdf_Click(object sender, EventArgs e)
+        private async void BtnRemovePdf_Click(object sender, EventArgs e)
         {
             int idx = _lstFiles.SelectedIndex;
             if (idx < 0 || idx >= _pdfPaths.Count) return;
 
             _pdfPaths.RemoveAt(idx);
-            RebuildSourceWithUiFeedback();
-            RefreshFilesList();
+            await RebuildSourceAsync();
 
             if (_pdfPaths.Count > 0)
                 _lstFiles.SelectedIndex = Math.Min(idx, _pdfPaths.Count - 1);
         }
 
         /// <summary>Перемещает выделенный файл вверх (−1) или вниз (+1) по списку.</summary>
-        private void MoveSelectedFile(int direction)
+        private async Task MoveSelectedFileAsync(int direction)
         {
             int idx = _lstFiles.SelectedIndex;
             if (idx < 0) return;
@@ -921,13 +1109,11 @@ namespace NUpPdfPrinter
             _pdfPaths[idx] = _pdfPaths[newIdx];
             _pdfPaths[newIdx] = tmp;
 
-            RebuildSourceWithUiFeedback();
-            RefreshFilesList();
+            await RebuildSourceAsync();
             _lstFiles.SelectedIndex = newIdx;
         }
 
-        /// <summary>Полностью очищает список файлов.</summary>
-        private void BtnClearFiles_Click(object sender, EventArgs e)
+        private async void BtnClearFiles_Click(object sender, EventArgs e)
         {
             if (_pdfPaths.Count == 0) return;
 
@@ -938,138 +1124,7 @@ namespace NUpPdfPrinter
             if (r != DialogResult.Yes) return;
 
             _pdfPaths.Clear();
-            RebuildSourceWithUiFeedback();
-            RefreshFilesList();
-        }
-
-        /// <summary>
-        /// Обновляет ListBox: имя файла, количество страниц, глобальный диапазон.
-        /// </summary>
-        private void RefreshFilesList()
-        {
-            _lstFiles.BeginUpdate();
-            try
-            {
-                _lstFiles.Items.Clear();
-                int startIndex = 0;
-
-                foreach (var path in _pdfPaths)
-                {
-                    int n;
-                    try
-                    {
-                        using (var doc = PdfiumViewer.PdfDocument.Load(path))
-                            n = doc.PageCount;
-                    }
-                    catch
-                    {
-                        n = 0;
-                    }
-
-                    string range = n > 0
-                        ? "  (" + (startIndex + 1) + "—" + (startIndex + n) + ")"
-                        : "  (ошибка открытия)";
-
-                    _lstFiles.Items.Add(
-                        Path.GetFileName(path) + "  —  " + n + " стр." + range);
-
-                    startIndex += n;
-                }
-            }
-            finally
-            {
-                _lstFiles.EndUpdate();
-                UpdateFileButtons();
-            }
-        }
-
-        /// <summary>Включает/выключает кнопки управления файлами по состоянию списка.</summary>
-        private void UpdateFileButtons()
-        {
-            int idx = _lstFiles.SelectedIndex;
-            int count = _pdfPaths.Count;
-
-            _btnRemovePdf.Enabled = idx >= 0;
-            _btnMoveUp.Enabled = idx > 0;
-            _btnMoveDown.Enabled = idx >= 0 && idx < count - 1;
-            _btnClearFiles.Enabled = count > 0;
-        }
-
-        // ====================================================================
-        //  Пересборка источника (после изменения списка файлов или бюджета кэша)
-        // ====================================================================
-        /// <summary>
-        /// Пересобирает CompositePageImageSource по текущему _pdfPaths.
-        /// Старый источник освобождается ТОЛЬКО после успешной сборки нового,
-        /// чтобы при ошибке не потерять уже открытые файлы.
-        /// </summary>
-        private bool TryRebuildSource(out string error)
-        {
-            error = null;
-            var newSource = new CompositePageImageSource();
-            try
-            {
-                foreach (var path in _pdfPaths)
-                {
-                    var pdf = new PdfPageImageSource(path, GetCacheBudgetBytes());
-                    newSource.Add(pdf);
-                }
-            }
-            catch (Exception ex)
-            {
-                newSource.Dispose();
-                error = ex.Message;
-                return false;
-            }
-
-            DisposeSource();
-            _source = newSource;
-            _pageCount = newSource.PageCount;
-            return true;
-        }
-
-        private void RebuildSourceWithUiFeedback()
-        {
-            if (_pdfPaths.Count == 0)
-            {
-                DisposeSource();
-                _pageCount = 0;
-
-                _btnPrint.Enabled = false;
-                _btnPreview.Enabled = false;
-                _btnClearCache.Enabled = false;
-
-                _suppressRangeUpdate = true;
-                _numFirstPage.Maximum = 1;
-                _numLastPage.Maximum = 1;
-                _numFirstPage.Value = 1;
-                _numLastPage.Value = 1;
-                _suppressRangeUpdate = false;
-
-                _lblPreview.Text = string.Empty;
-                return;
-            }
-
-            if (!TryRebuildSource(out var error))
-            {
-                MessageBox.Show(this,
-                    "Не удалось открыть один или несколько PDF:\r\n" + error,
-                    "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-
-            _btnPrint.Enabled = true;
-            _btnPreview.Enabled = true;
-            _btnClearCache.Enabled = true;
-
-            _suppressRangeUpdate = true;
-            _numFirstPage.Maximum = Math.Max(1, _pageCount);
-            _numLastPage.Maximum = Math.Max(1, _pageCount);
-            _numFirstPage.Value = 1;
-            _numLastPage.Value = Math.Max(1, _pageCount);
-            _suppressRangeUpdate = false;
-
-            UpdatePreviewText();
+            await RebuildSourceAsync();
         }
 
         // ====================================================================
@@ -1124,26 +1179,37 @@ namespace NUpPdfPrinter
             switch (_cmbCacheBudget.SelectedIndex)
             {
                 case 0: return 0L;
-                case 1: return 16L * 1024 * 1024;
-                case 2: return 32L * 1024 * 1024;
-                case 3: return 48L * 1024 * 1024;
-                case 4: return 96L * 1024 * 1024;
-                case 5: return 192L * 1024 * 1024;
-                default: return 48L * 1024 * 1024;
+                case 1: return 32L * 1024 * 1024;
+                case 2: return 64L * 1024 * 1024;
+                case 3: return 96L * 1024 * 1024;
+                case 4: return 192L * 1024 * 1024;
+                case 5: return 384L * 1024 * 1024;
+                default: return 96L * 1024 * 1024;
             }
         }
 
-        private void BtnClearCache_Click(object sender, EventArgs e)
+        private async void BtnClearCache_Click(object sender, EventArgs e)
         {
             if (_source == null) return;
 
-            _source.ClearCache();
+            BeginBusy("Очистка кэша…");
+            try
+            {
+                var src = _source;
+                await Task.Run(() =>
+                {
+                    src.ClearCache();
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+                });
 
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-
-            UpdatePreviewText();
+                UpdatePreviewText();
+            }
+            finally
+            {
+                EndBusy();
+            }
         }
 
         // ====================================================================
@@ -1193,7 +1259,8 @@ namespace NUpPdfPrinter
             double by = (double)_numBackOffsetY.Value;
 
             int sheetsSelected;
-            using (var doc = CreateDocument(_chkDuplex.Checked, _cmbDuplexEdge.SelectedIndex == 0))
+            using (var doc = CreateDocument(_chkDuplex.Checked,
+                       _cmbDuplexEdge.SelectedIndex == 0))
             {
                 sheetsSelected = doc.SheetCount;
             }
@@ -1220,7 +1287,8 @@ namespace NUpPdfPrinter
                 "зазор: " + betweenMm.ToString("0.0") + " мм\r\n" +
                 "Сдвиг оборота: X = " + bx.ToString("0.0") +
                 " мм, Y = " + by.ToString("0.0") + " мм" +
-                (_chkRegistrationMarks.Checked ? "  •  метки совмещения ВКЛ" : "") + "\r\n" +
+                (_chkRegistrationMarks.Checked
+                    ? "  •  метки совмещения ВКЛ" : "") + "\r\n" +
                 "Кэш страниц: " +
                 (_source.CacheBytes / (1024.0 * 1024.0)).ToString("0.0") + " МБ";
         }
@@ -1245,6 +1313,10 @@ namespace NUpPdfPrinter
         private double GetMarginBottomMm() => (double)_numMarginBottom.Value;
         private bool GetSheetLandscape() => _cmbOrientation.SelectedIndex == 1;
 
+        /// <summary>
+        /// Собирает NUpPrintDocument из текущих настроек UI.
+        /// Один и тот же метод используется и для предпросмотра, и для печати.
+        /// </summary>
         private NUpPrintDocument CreateDocument(bool duplex, bool longEdge)
         {
             int n = (int)_cmbPagesPerSheet.SelectedItem;
@@ -1286,16 +1358,18 @@ namespace NUpPdfPrinter
         // ====================================================================
         //  Предпросмотр
         // ====================================================================
-        private void BtnPreview_Click(object sender, EventArgs e)
+        private async void BtnPreview_Click(object sender, EventArgs e)
         {
             if (_source == null) return;
 
             const int previewDpi = 120;
 
-            using (var doc = CreateDocument(
-                       _chkDuplex.Checked,
-                       _cmbDuplexEdge.SelectedIndex == 0))
+            NUpPrintDocument doc = null;
+            try
             {
+                doc = CreateDocument(_chkDuplex.Checked,
+                                     _cmbDuplexEdge.SelectedIndex == 0);
+
                 if (doc.SheetCount == 0)
                 {
                     MessageBox.Show(this,
@@ -1309,24 +1383,33 @@ namespace NUpPdfPrinter
                     dlg.ShowDialog(this);
                 }
             }
+            finally
+            {
+                doc?.Dispose();
 
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+                // Освобождение GDI+ после закрытия предпросмотра — в фоне,
+                // чтобы не морозить форму на секунду.
+                await Task.Run(() =>
+                {
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+                });
 
-            UpdatePreviewText();
+                UpdatePreviewText();
+            }
         }
 
         // ====================================================================
         //  Печать
         // ====================================================================
-        private void BtnPrint_Click(object sender, EventArgs e)
+        private async void BtnPrint_Click(object sender, EventArgs e)
         {
             if (_source == null) return;
 
-            using (var doc = CreateDocument(
-                       _chkDuplex.Checked,
-                       _cmbDuplexEdge.SelectedIndex == 0))
+            var doc = CreateDocument(_chkDuplex.Checked,
+                                     _cmbDuplexEdge.SelectedIndex == 0);
+            try
             {
                 if (doc.SheetCount == 0)
                 {
@@ -1347,40 +1430,57 @@ namespace NUpPdfPrinter
                 {
                     if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
+                    BeginBusy("Печать…");
                     try
                     {
-                        doc.Print();
-
-                        MessageBox.Show(this,
-                            "Документ отправлен на печать.",
-                            "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        // Print синхронен, но вынесем в Task.Run — UI не морозится
+                        // во время формирования спул-файла.
+                        await Task.Run(() => doc.Print());
                     }
                     catch (System.Runtime.InteropServices.ExternalException ex)
                     {
                         MessageBox.Show(this,
-                            "Ошибка GDI+ при печати (код 0x" + ex.ErrorCode.ToString("X") + ").\r\n" +
+                            "Ошибка GDI+ при печати (код 0x" +
+                            ex.ErrorCode.ToString("X") + ").\r\n" +
                             "Наиболее вероятные причины:\r\n" +
                             " • мало свободного места на диске C:\\ (спулер печати);\r\n" +
                             " • проблема с драйвером принтера;\r\n" +
                             " • принтер офлайн или недоступен.",
                             "Ошибка печати",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
                     }
                     catch (Exception ex)
                     {
                         MessageBox.Show(this,
                             "Ошибка печати:\r\n" + ex.Message,
                             "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
                     }
+                    finally
+                    {
+                        EndBusy();
+                    }
+
+                    MessageBox.Show(this,
+                        "Документ отправлен на печать.",
+                        "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
             }
-
-            UpdatePreviewText();
+            finally
+            {
+                doc.Dispose();
+                UpdatePreviewText();
+            }
         }
 
         // ====================================================================
         //  Время жизни источника PDF
         // ====================================================================
+        /// <summary>
+        /// Освобождает PdfDocument и все закэшированные Bitmap-ы.
+        /// Вызывается при закрытии формы, переоткрытии PDF и очистке списка.
+        /// </summary>
         private void DisposeSource()
         {
             if (_source != null)
